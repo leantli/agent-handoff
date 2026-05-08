@@ -14,7 +14,8 @@ import { afterEach, describe, expect, test } from "vitest";
 import {
   HandoffError,
   buildStartPacket,
-  initRepo,
+  enableHandoff,
+  enableSync,
   installSkill,
   learn,
   normalizeProjectId,
@@ -72,6 +73,25 @@ describe("vault setup", () => {
     expect(lessons).toContain("A device learned this.");
   });
 
+  test("enableSync replaces a fresh local seed vault with remote memory", () => {
+    const tmp = tempDir();
+    const bare = join(tmp, "vault.git");
+    const homeA = join(tmp, "home-a");
+    const homeB = join(tmp, "home-b");
+    execFileSync("git", ["init", "--bare", bare]);
+
+    enableHandoff({ home: homeA, skillsHome: join(tmp, "skills-a") });
+    learn("Remote memory should survive device setup order.", { home: homeA, kind: "lesson" });
+    enableSync({ home: homeA, syncUrl: bare });
+    syncVault({ home: homeA });
+
+    enableHandoff({ home: homeB, skillsHome: join(tmp, "skills-b") });
+    enableSync({ home: homeB, syncUrl: bare });
+
+    const lessons = readFileSync(join(homeB, "vault", "global", "lessons.md"), "utf8");
+    expect(lessons).toContain("Remote memory should survive");
+  });
+
   test("normalizeProjectId handles HTTPS and SSH remotes", () => {
     expect(normalizeProjectId("https://github.com/leantli/agent-handoff.git")).toBe(
       "github.com__leantli__agent-handoff",
@@ -91,27 +111,46 @@ describe("vault setup", () => {
     expect(readFileSync(result.path, "utf8")).toContain("agent-handoff start");
     expect(result.path).toBe(resolve(skillsHome, "agent-handoff", "SKILL.md"));
   });
+
+  test("enableHandoff creates local memory and installs the user skill", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const skillsHome = join(tmp, "skills");
+
+    const result = enableHandoff({ home, skillsHome });
+
+    expect(result.setup.home).toBe(resolve(home));
+    expect(existsSync(join(home, "vault", "global", "preferences.md"))).toBe(true);
+    expect(existsSync(join(skillsHome, "agent-handoff", "SKILL.md"))).toBe(true);
+  });
 });
 
-describe("init", () => {
-  test("initRepo writes repo bootstrap and vault project, not repo memory", () => {
+describe("project identity", () => {
+  test("start auto-creates project memory from git remote without editing instruction files", () => {
     const tmp = tempDir();
     const root = join(tmp, "repo");
     const home = join(tmp, "home");
     mkdirSync(root);
+    execFileSync("git", ["init"], { cwd: root });
+    execFileSync("git", ["remote", "add", "origin", "git@github.com:leantli/agent-handoff.git"], {
+      cwd: root,
+    });
+    writeFileSync(join(root, "AGENTS.md"), "# Existing Instructions\n\nDo not overwrite this.\n");
 
-    const result = initRepo({
+    enableHandoff({ home, skillsHome: join(tmp, "skills") });
+    const packet = buildStartPacket({
       root,
       home,
-      projectId: "github.com__leantli__agent-handoff",
       branch: "main",
     });
 
-    expect(result.projectId).toBe("github.com__leantli__agent-handoff");
-    expect(existsSync(join(root, ".agent-handoff.yml"))).toBe(true);
+    expect(packet).toContain("Project: `github.com__leantli__agent-handoff`");
+    expect(existsSync(join(root, ".agent-handoff.yml"))).toBe(false);
     expect(existsSync(join(root, ".agent-handoff", "project.md"))).toBe(false);
-    expect(readFileSync(join(root, "AGENTS.md"), "utf8")).toContain("agent-handoff start");
-    expect(readFileSync(join(root, "CLAUDE.md"), "utf8")).toContain("agent-handoff start");
+    expect(readFileSync(join(root, "AGENTS.md"), "utf8")).toBe(
+      "# Existing Instructions\n\nDo not overwrite this.\n",
+    );
+    expect(existsSync(join(root, "CLAUDE.md"))).toBe(false);
 
     const project = join(home, "vault", "projects", "github.com__leantli__agent-handoff");
     expect(existsSync(join(project, "project.md"))).toBe(true);
@@ -120,23 +159,17 @@ describe("init", () => {
     expect(existsSync(join(project, "branches", "main.md"))).toBe(true);
   });
 
-  test("initRepo reuses project id from bootstrap across new directories", () => {
+  test("start can reuse optional project id from bootstrap when present", () => {
     const tmp = tempDir();
     const home = join(tmp, "home");
-    const first = join(tmp, "first");
-    const second = join(tmp, "second");
-    mkdirSync(first);
-    mkdirSync(second);
+    const root = join(tmp, "repo");
+    mkdirSync(root);
+    enableHandoff({ home, skillsHome: join(tmp, "skills") });
+    writeFileSync(join(root, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo\n");
 
-    initRepo({ root: first, home, projectId: "github.com__owner__repo" });
-    writeFileSync(
-      join(second, ".agent-handoff.yml"),
-      "version: 2\nproject_id: github.com__owner__repo\n",
-    );
+    const packet = buildStartPacket({ root, home });
 
-    const result = initRepo({ root: second, home });
-
-    expect(result.projectId).toBe("github.com__owner__repo");
+    expect(packet).toContain("Project: `github.com__owner__repo`");
     expect(existsSync(join(home, "vault", "projects", "github.com__owner__repo", "project.md"))).toBe(
       true,
     );
@@ -149,7 +182,9 @@ describe("start, checkpoint, and learn", () => {
     const root = join(tmp, "repo");
     const home = join(tmp, "home");
     mkdirSync(root);
-    initRepo({ root, home, projectId: "github.com__owner__repo", branch: "main" });
+    enableHandoff({ home, skillsHome: join(tmp, "skills") });
+    writeFileSync(join(root, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo\n");
+    buildStartPacket({ root, home, branch: "main" });
     const vaultProject = join(home, "vault", "projects", "github.com__owner__repo");
     writeFileSync(join(home, "vault", "global", "preferences.md"), "# Global Preferences\n\nUse concise answers.\n");
     writeFileSync(join(vaultProject, "project.md"), "# Project Context\n\nAPI repo.\n");
@@ -176,7 +211,9 @@ describe("start, checkpoint, and learn", () => {
     const root = join(tmp, "repo");
     const home = join(tmp, "home");
     mkdirSync(root);
-    initRepo({ root, home, projectId: "github.com__owner__repo", branch: "main" });
+    enableHandoff({ home, skillsHome: join(tmp, "skills") });
+    writeFileSync(join(root, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo\n");
+    buildStartPacket({ root, home, branch: "main" });
     writeCheckpoint({
       root,
       note: "Main branch checkpoint.",
@@ -205,7 +242,9 @@ describe("start, checkpoint, and learn", () => {
     const root = join(tmp, "repo");
     const home = join(tmp, "home");
     mkdirSync(root);
-    initRepo({ root, home, projectId: "github.com__owner__repo" });
+    enableHandoff({ home, skillsHome: join(tmp, "skills") });
+    writeFileSync(join(root, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo\n");
+    buildStartPacket({ root, home });
 
     const result = writeCheckpoint({
       root,
@@ -229,7 +268,9 @@ describe("start, checkpoint, and learn", () => {
     const root = join(tmp, "repo");
     const home = join(tmp, "home");
     mkdirSync(root);
-    initRepo({ root, home, projectId: "github.com__owner__repo" });
+    enableHandoff({ home, skillsHome: join(tmp, "skills") });
+    writeFileSync(join(root, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo\n");
+    buildStartPacket({ root, home });
 
     expect(() =>
       writeCheckpoint({ root, note: "OPENAI_API_KEY=sk-secret", home }),
@@ -261,7 +302,9 @@ describe("start, checkpoint, and learn", () => {
     const root = join(tmp, "repo");
     const home = join(tmp, "home");
     mkdirSync(root);
-    initRepo({ root, home, projectId: "github.com__owner__repo", branch: "main" });
+    enableHandoff({ home, skillsHome: join(tmp, "skills") });
+    writeFileSync(join(root, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo\n");
+    buildStartPacket({ root, home, branch: "main" });
 
     const project = learn("Use vault-first architecture.", {
       home,
@@ -280,5 +323,18 @@ describe("start, checkpoint, and learn", () => {
     expect(readFileSync(project.path, "utf8")).toContain("vault-first");
     expect(readFileSync(branch.path, "utf8")).toContain("v0.3");
   });
-});
 
+  test("enableSync configures cross-device sync separately from local enable", () => {
+    const tmp = tempDir();
+    const bare = join(tmp, "vault.git");
+    const home = join(tmp, "home");
+    execFileSync("git", ["init", "--bare", bare]);
+
+    const result = enableSync({ home, syncUrl: bare });
+
+    const config = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
+    expect(result.vault).toBe(resolve(home, "vault"));
+    expect(config.sync_url).toBe(bare);
+    expect(existsSync(join(home, "vault", ".git"))).toBe(true);
+  });
+});

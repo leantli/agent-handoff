@@ -12,10 +12,13 @@ Use `agent-handoff` to restore and preserve coding-agent context.
 When beginning work in a repository:
 
 1. Run `agent-handoff status`.
-2. If status says the repo is not ready, run `agent-handoff setup` if the vault is missing, then `agent-handoff init`.
-3. If vault sync is configured, run `agent-handoff sync`.
+2. If status says agent-handoff is not enabled, tell the user to run `agent-handoff enable`.
+3. If sync is configured and the user is switching devices or clones, run `agent-handoff sync`.
 4. Run `agent-handoff start`.
 5. Read the returned packet before changing files.
+
+Do not edit `AGENTS.md`, `CLAUDE.md`, or other instruction files to install
+agent-handoff.
 
 ## During Work
 
@@ -55,7 +58,7 @@ agent, write a concise checkpoint:
 agent-handoff checkpoint --note "<current goal, completed work, open questions, next step>"
 ```
 
-If vault sync is configured, run:
+If sync is configured, run:
 
 ```bash
 agent-handoff sync
@@ -69,4 +72,4 @@ If sync fails, keep the local checkpoint and report the error.
 - Keep checkpoints factual and concise.
 - Do not use `learn` for temporary task state; use `checkpoint` instead.
 - Prefer project or branch scope for project-specific facts instead of global memory.
-- If `agent-handoff` is not installed, tell the user the CLI is missing and continue without pretending context was saved.
+- Do not modify repository instruction files as part of agent-handoff installation or use.

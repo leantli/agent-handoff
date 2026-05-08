@@ -1,131 +1,82 @@
 # agent-handoff
 
-`agent-handoff` gives Codex and Claude Code a shared memory handoff layer across
-new sessions, fresh clones, git worktrees, and devices.
+`agent-handoff` gives coding agents a small shared memory layer for new sessions,
+fresh clones, git worktrees, and devices.
 
-A long agent session often accumulates useful context: project background,
-current task state, decisions, preferences, and repeated corrections. Without a
-handoff layer, a new session or another device starts cold.
+Long agent sessions accumulate useful context: project background, current task
+state, decisions, preferences, and repeated corrections. Without a handoff
+layer, the next session starts cold.
 
-`agent-handoff` stores that context in a user-level vault, then lets any clone or
-worktree of the same repository recover it by project identity.
-
-```text
-~/.agent-handoff/vault/        # private user memory
-repo/.agent-handoff.yml        # lightweight project identity
-repo/AGENTS.md                 # Codex bootstrap instruction
-repo/CLAUDE.md                 # Claude Code bootstrap instruction
-```
+`agent-handoff` stores that context under `~/.agent-handoff` by default. It does
+not modify `AGENTS.md`, `CLAUDE.md`, or other project instruction files.
 
 ## Install
 
-From npm:
-
 ```bash
 npm install -g @leantli/agent-handoff
+agent-handoff enable
 ```
 
-From a checkout:
-
-```bash
-npm install
-npm run build
-npm link
-```
-
-## Three-Minute Setup
-
-Create your local vault once:
-
-```bash
-agent-handoff setup
-agent-handoff install-skill
-```
-
-Optional: sync the vault through a private git repo so another device can share
-the same handoff memory:
-
-```bash
-agent-handoff setup --sync git@github.com:you/agent-handoff-vault.git
-```
-
-Bootstrap each coding project once:
-
-```bash
-agent-handoff init
-```
-
-This writes:
-
-```text
-.agent-handoff.yml
-AGENTS.md
-CLAUDE.md
-```
-
-It does not write private memory into the project repository.
+`enable` creates local memory and installs the user skill that tells compatible
+agents when to run `start`, `checkpoint`, and `learn`.
 
 ## Daily Workflow
 
-At the start of a new Codex or Claude Code session:
+At the start of a coding session:
 
 ```bash
-agent-handoff sync     # only if vault sync is configured
 agent-handoff start
 ```
 
-Paste or let the agent read the start packet before it works.
-
-When a useful session is about to end, or before switching devices:
+Before switching sessions, tasks, clones, or devices:
 
 ```bash
-agent-handoff checkpoint --note "Implemented vault storage; next step is README polish."
-agent-handoff sync     # only if vault sync is configured
+agent-handoff checkpoint --note "Current goal, completed work, open questions, next step."
 ```
 
-When the user corrects a stable preference or recurring rule:
+When the user gives a stable preference or recurring correction:
 
 ```bash
-agent-handoff learn --kind preference --note "Prefer TDD for behavior changes."
+agent-handoff learn --kind preference --note "Prefer small focused diffs."
 ```
 
 For project-specific decisions or branch-specific context:
 
 ```bash
 agent-handoff learn --scope project --kind decision --note "Use vault-first storage."
-agent-handoff learn --scope branch --kind context --note "Main is preparing v0.3."
+agent-handoff learn --scope branch --kind context --note "This branch is testing v0.5."
 ```
 
-When configured, `sync` commits pending vault changes and pushes them to the
-private vault repository.
+## Cross-Device Sync
 
-## Why This Solves Cross-Clone Context
+Local cross-session memory works without any git repository. To share memory
+across devices, create a private git repository for the vault, then run:
 
-`agent-handoff` identifies a project from `.agent-handoff.yml` or the git
-`origin` remote. These all map to the same vault project:
+```bash
+agent-handoff sync init git@github.com:you/agent-handoff-vault.git
+agent-handoff sync
+```
+
+After that, run `agent-handoff sync` before starting on another device and after
+writing useful checkpoints.
+
+## How Projects Are Identified
+
+By default, `agent-handoff` identifies the current project from the git `origin`
+remote. Different clones, sibling checkouts, or worktrees of the same repository
+map to the same project memory:
 
 ```text
-~/code/repo
-~/tmp/repo
-~/worktrees/repo-feature
-another device's ~/projects/repo
+https://github.com/p1cn/loop.git
+git@github.com:p1cn/loop.git
+
+github.com__p1cn__loop
 ```
 
-For example, both remotes below normalize to the same project id:
-
-```text
-https://github.com/leantli/agent-handoff.git
-git@github.com:leantli/agent-handoff.git
-
-github.com__leantli__agent-handoff
-```
-
-That means A session can checkpoint context into the vault, and B session can
-recover it from any clone or worktree that resolves to the same project id.
+If `.agent-handoff.yml` exists, its `project_id` is used as an override. The
+tool does not require this file for normal git repositories.
 
 ## What Gets Stored
-
-The vault is private user state:
 
 ```text
 ~/.agent-handoff/
@@ -146,64 +97,30 @@ The vault is private user state:
           20260508T103000Z-laptop-codex-main.md
 ```
 
-The project repository gets only bootstrap files:
+The layers are:
 
-```text
-.agent-handoff.yml
-AGENTS.md
-CLAUDE.md
-```
+- `global`: preferences and lessons that apply across projects.
+- `project`: durable background, decisions, and preferences for one repository.
+- `branch`: task or branch-specific context.
+- `checkpoints`: recent session handoff notes.
 
 ## Commands
 
 ```bash
-agent-handoff setup       # create/configure the user vault
-agent-handoff install-skill # install the agent workflow skill
-agent-handoff init        # bootstrap the current repo
-agent-handoff start       # print the context packet for a new session
+agent-handoff enable      # create local memory and install the user skill
+agent-handoff start       # print context for the current project and branch
 agent-handoff checkpoint  # write a session checkpoint
-agent-handoff learn       # write durable global/project/branch memory
-agent-handoff sync        # git pull/rebase + push the vault
+agent-handoff learn       # store durable global/project/branch memory
+agent-handoff sync init   # enable optional cross-device sync
+agent-handoff sync        # pull/rebase and push the vault
 agent-handoff status      # quick readiness check
-agent-handoff doctor      # detailed health check
 ```
-
-## Agent Skill
-
-This repo includes a Codex-compatible skill:
-
-```text
-.agents/skills/agent-handoff/SKILL.md
-```
-
-The skill tells an agent when to run `start`, `checkpoint`, `learn`, and `sync`.
-Install it into your user skills directory to make the workflow available across
-all repositories:
-
-```bash
-agent-handoff install-skill
-```
-
-The repo also keeps a copy at `.agents/skills/agent-handoff/SKILL.md` for
-project-local use.
-
-## Status
-
-This is an early prototype. It does not read proprietary chat transcripts or
-client-internal state. Agents must still call `start`, `checkpoint`, and `learn`
-at the right moments, guided by `AGENTS.md` and `CLAUDE.md`.
 
 ## Development
 
-Run tests:
-
 ```bash
+npm install
 npm test
-```
-
-Run type checking and build:
-
-```bash
 npm run typecheck
 npm run build
 ```

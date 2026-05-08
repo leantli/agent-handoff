@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -41,34 +42,30 @@ function runCli(repo: string, ...args: string[]): { code: number; stdout: string
 }
 
 describe("cli", () => {
-  test("setup, init, checkpoint, and start flow", () => {
+  test("enable, checkpoint, and start flow without touching instruction files", () => {
     const tmp = tempDir();
     const repo = join(tmp, "repo");
     const home = join(tmp, "home");
+    const skillsHome = join(tmp, "skills");
     mkdirSync(repo);
+    // Write a bootstrap only to pin deterministic project id in this unit test.
+    // Normal repos can derive the id from git remote.
+    const bootstrapPath = join(repo, ".agent-handoff.yml");
 
-    let result = runCli(repo, "--home", home, "setup");
+    let result = runCli(repo, "--home", home, "enable", "--skills-home", skillsHome);
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("Agent handoff home");
+    expect(result.stdout).toContain("Agent handoff enabled");
+    expect(existsSync(join(skillsHome, "agent-handoff", "SKILL.md"))).toBe(true);
 
-    result = runCli(
-      repo,
-      "--home",
-      home,
-      "init",
-      "--project-id",
-      "github.com__owner__repo",
-      "--branch",
-      "main",
-      "--client",
-      "codex",
-    );
+    writeFileSync(bootstrapPath, "version: 2\nproject_id: github.com__owner__repo\n");
+    writeFileSync(join(repo, "AGENTS.md"), "# Existing\n");
+
+    result = runCli(repo, "--home", home, "start", "--branch", "main");
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
-    expect(result.stdout).toContain("Initialized agent handoff");
-    expect(existsSync(join(repo, ".agent-handoff.yml"))).toBe(true);
+    expect(result.stdout).toContain("# Agent Handoff Start Packet");
     expect(existsSync(join(repo, ".agent-handoff", "project.md"))).toBe(false);
-    expect(existsSync(join(repo, "AGENTS.md"))).toBe(true);
+    expect(readFileSync(join(repo, "AGENTS.md"), "utf8")).toBe("# Existing\n");
     expect(existsSync(join(repo, "CLAUDE.md"))).toBe(false);
 
     result = runCli(
@@ -97,7 +94,7 @@ describe("cli", () => {
     const repo = join(tmp, "repo");
     const home = join(tmp, "home");
     mkdirSync(repo);
-    runCli(repo, "--home", home, "setup");
+    runCli(repo, "--home", home, "enable", "--skills-home", join(tmp, "skills"));
 
     const result = runCli(
       repo,
@@ -122,7 +119,9 @@ describe("cli", () => {
     const repo = join(tmp, "repo");
     const home = join(tmp, "home");
     mkdirSync(repo);
-    runCli(repo, "--home", home, "init", "--project-id", "github.com__owner__repo");
+    runCli(repo, "--home", home, "enable", "--skills-home", join(tmp, "skills"));
+    writeFileSync(join(repo, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo\n");
+    runCli(repo, "--home", home, "start");
 
     const result = runCli(
       repo,
@@ -141,7 +140,7 @@ describe("cli", () => {
     expect(result.stdout).toContain("Learned project decision");
   });
 
-  test("status and doctor report not ready before init", () => {
+  test("status reports not ready before enable and ready after enable", () => {
     const tmp = tempDir();
     const repo = join(tmp, "repo");
     const home = join(tmp, "home");
@@ -149,26 +148,42 @@ describe("cli", () => {
 
     const status = runCli(repo, "--home", home, "status");
     expect(status.code).toBe(1);
-    expect(status.stdout).toContain(".agent-handoff.yml is missing");
+    expect(status.stdout).toContain("agent-handoff is not enabled");
     expect(status.stderr).toBe("");
 
-    const doctor = runCli(repo, "--home", home, "doctor");
-    expect(doctor.code).toBe(1);
-    expect(doctor.stdout).toContain("vault config is missing");
-    expect(doctor.stderr).toBe("");
+    const enable = runCli(repo, "--home", home, "enable", "--skills-home", join(tmp, "skills"));
+    expect(enable.code).toBe(0);
+
+    const ready = runCli(repo, "--home", home, "status");
+    expect(ready.code).toBe(0);
+    expect(ready.stdout).toContain("Agent handoff is ready");
   });
 
-  test("install-skill command writes skill file", () => {
+  test("start requires enable", () => {
     const tmp = tempDir();
     const repo = join(tmp, "repo");
-    const skillsHome = join(tmp, "skills");
+    const home = join(tmp, "home");
     mkdirSync(repo);
 
-    const result = runCli(repo, "install-skill", "--skills-home", skillsHome);
+    const result = runCli(repo, "--home", home, "start");
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("agent-handoff is not enabled");
+  });
+
+  test("sync init configures cross-device sync", () => {
+    const tmp = tempDir();
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    const bare = join(tmp, "vault.git");
+    mkdirSync(repo);
+    execFileSync("git", ["init", "--bare", bare]);
+
+    const result = runCli(repo, "--home", home, "sync", "init", bare);
 
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("Installed skill");
-    expect(existsSync(join(skillsHome, "agent-handoff", "SKILL.md"))).toBe(true);
+    expect(result.stdout).toContain("Cross-device sync enabled");
+    expect(readFileSync(join(home, "config.json"), "utf8")).toContain(bare);
   });
 
   test("checkpoint without note on tty fails fast", () => {
@@ -176,7 +191,9 @@ describe("cli", () => {
     const repo = join(tmp, "repo");
     const home = join(tmp, "home");
     mkdirSync(repo);
-    runCli(repo, "--home", home, "init", "--project-id", "github.com__owner__repo");
+    runCli(repo, "--home", home, "enable", "--skills-home", join(tmp, "skills"));
+    writeFileSync(join(repo, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo\n");
+    runCli(repo, "--home", home, "start");
 
     const stdout = new BufferWriter();
     const stderr = new BufferWriter();
@@ -192,4 +209,3 @@ describe("cli", () => {
     expect(stderr.text()).toContain("provide --note");
   });
 });
-

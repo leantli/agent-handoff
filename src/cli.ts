@@ -1,15 +1,13 @@
 import { readFileSync } from "node:fs";
-import { Command, CommanderError, InvalidArgumentError, Option } from "commander";
+import { Command, CommanderError, Option } from "commander";
 
 import {
   HandoffError,
   buildStartPacket,
-  doctor,
+  enableHandoff,
+  enableSync,
   getStatus,
-  initRepo,
-  installSkill,
   learn,
-  setupHome,
   syncVault,
   writeCheckpoint,
 } from "./core.js";
@@ -51,7 +49,7 @@ function buildProgram(
   program
     .name("agent-handoff")
     .description("Shared vault handoff memory for Codex and Claude Code.")
-    .version("agent-handoff 0.4.0")
+    .version("agent-handoff 0.5.0")
     .exitOverride()
     .configureOutput({
       writeOut: (str) => stdout.write(str),
@@ -60,46 +58,19 @@ function buildProgram(
     .option("--home <path>", "Agent handoff home directory. Defaults to ~/.agent-handoff.");
 
   program
-    .command("setup")
-    .description("Create or configure the user vault.")
+    .command("enable")
+    .description("Enable local handoff memory and install the user skill.")
     .option("--vault <path>", "Vault directory. Defaults to HOME/vault.")
-    .option("--sync <url>", "Optional git remote URL for vault sync.")
-    .action((options: { vault?: string; sync?: string }) => {
-      const result = setupHome({ home: globalHome(program), vault: options.vault, syncUrl: options.sync });
-      stdout.write(`Agent handoff home: ${result.home}\n`);
-      stdout.write(`Vault: ${result.vault}\n`);
-    });
-
-  program
-    .command("install-skill")
-    .description("Install the agent-handoff skill into a user skills directory.")
     .option("--skills-home <path>", "Skills home directory. Defaults to ~/.agents/skills.")
-    .action((options: { skillsHome?: string }) => {
-      const result = installSkill({ skillsHome: options.skillsHome });
-      const verb = result.updated ? "Installed skill" : "Skill already installed";
-      stdout.write(`${verb}: ${result.path}\n`);
-    });
-
-  program
-    .command("init")
-    .description("Bootstrap this repo for agent handoff.")
-    .option("--project-id <id>", "Override detected project id.")
-    .option("--branch <branch>", "Override detected branch.")
-    .addOption(
-      new Option("--client <client>", "Client bootstrap to install. Repeat to install multiple. Defaults to both.")
-        .choices(["codex", "claude"])
-        .argParser(collect),
-    )
-    .action((options: { projectId?: string; branch?: string; client?: string[] }) => {
-      const result = initRepo({
-        root: cwd,
+    .action((options: { vault?: string; skillsHome?: string }) => {
+      const result = enableHandoff({
         home: globalHome(program),
-        projectId: options.projectId,
-        branch: options.branch,
-        clients: options.client,
+        vault: options.vault,
+        skillsHome: options.skillsHome,
       });
-      stdout.write(`Initialized agent handoff for ${result.projectId}.\n`);
-      stdout.write(`Vault project: ${result.vaultProject}\n`);
+      stdout.write(`Agent handoff enabled: ${result.setup.home}\n`);
+      stdout.write(`Vault: ${result.setup.vault}\n`);
+      stdout.write(`Skill: ${result.skill.path}\n`);
     });
 
   program
@@ -149,10 +120,17 @@ function buildProgram(
       stdout.write(`Learned ${result.kind}: ${result.path}\n`);
     });
 
-  program
-    .command("sync")
-    .description("Pull and push the vault git repository.")
-    .action(() => {
+  const sync = program.command("sync").description("Sync the handoff vault.");
+  sync
+    .command("init <git-url>")
+    .description("Enable cross-device sync with a private git repository.")
+    .option("--vault <path>", "Vault directory. Defaults to HOME/vault.")
+    .action((gitUrl: string, options: { vault?: string }) => {
+      const result = enableSync({ home: globalHome(program), vault: options.vault, syncUrl: gitUrl });
+      stdout.write(`Cross-device sync enabled: ${gitUrl}\n`);
+      stdout.write(`Vault: ${result.vault}\n`);
+    });
+  sync.action(() => {
       for (const output of syncVault({ home: globalHome(program) })) {
         if (output) stdout.write(`${output}\n`);
       }
@@ -171,19 +149,6 @@ function buildProgram(
       }
     });
 
-  program
-    .command("doctor")
-    .description("Check bootstrap and vault health.")
-    .action(() => {
-      const report = doctor({ root: cwd, home: globalHome(program) });
-      if (report.ok) {
-        stdout.write(`Agent handoff is healthy for ${report.projectId}.\n`);
-      } else {
-        printProblems(report.problems, stdout);
-        throw new CommanderError(1, "agent-handoff.doctor", "doctor failed");
-      }
-    });
-
   return program;
 }
 
@@ -194,13 +159,6 @@ interface NoteOptions {
 
 function globalHome(program: Command): string | undefined {
   return program.opts<{ home?: string }>().home;
-}
-
-function collect(value: string, previous: string[] | undefined): string[] {
-  if (value !== "codex" && value !== "claude") {
-    throw new InvalidArgumentError("client must be codex or claude");
-  }
-  return [...(previous ?? []), value];
 }
 
 function readNote(options: NoteOptions, stdin?: { isTTY?: boolean }): string {

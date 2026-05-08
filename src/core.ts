@@ -8,22 +8,19 @@ import {
   writeFileSync,
 } from "node:fs";
 import { hostname, homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const DEFAULT_HOME = join(homedir(), ".agent-handoff");
 export const CONFIG_FILE = "config.json";
 export const BOOTSTRAP_FILE = ".agent-handoff.yml";
 
-const MANAGED_BEGIN = "<!-- BEGIN AGENT-HANDOFF -->";
-const MANAGED_END = "<!-- END AGENT-HANDOFF -->";
 const SECRET_PATTERNS = [
   /(api[_-]?key|token|secret|password)\s*[:=]/i,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
   /\bsk-[A-Za-z0-9_-]{8,}\b/,
 ];
 
-type Client = "codex" | "claude";
 type LearnScope = "global" | "project" | "branch";
 type LearnKind = "preference" | "lesson" | "decision" | "context";
 
@@ -41,13 +38,9 @@ export interface SetupResult {
   updated: number;
 }
 
-export interface InitResult {
-  created: number;
-  updated: number;
-  root: string;
-  projectId: string;
-  vaultProject: string;
-  clients: Client[];
+export interface EnableResult {
+  setup: SetupResult;
+  skill: InstallSkillResult;
 }
 
 export interface CheckpointResult {
@@ -70,13 +63,6 @@ export interface InstallSkillResult {
 
 export interface Status {
   initialized: boolean;
-  problems: string[];
-  root: string;
-  projectId: string | null;
-}
-
-export interface DoctorReport {
-  ok: boolean;
   problems: string[];
   root: string;
   projectId: string | null;
@@ -196,58 +182,22 @@ export function installSkill(opts: { skillsHome?: string } = {}): InstallSkillRe
   return { path, updated };
 }
 
-export function initRepo(opts: {
-  root?: string;
+export function enableHandoff(opts: {
   home?: string;
-  projectId?: string;
-  branch?: string;
-  clients?: string[];
-} = {}): InitResult {
-  const rootPath = resolve(opts.root ?? ".");
-  const setup = setupHome({ home: opts.home });
-  const pid = deriveProjectId(rootPath, opts.projectId);
-  const branchName = opts.branch ?? currentBranch(rootPath);
-  const selectedClients = normalizeClients(opts.clients);
-  let created = 0;
-  let updated = 0;
+  vault?: string;
+  skillsHome?: string;
+} = {}): EnableResult {
+  const setup = setupHome({ home: opts.home, vault: opts.vault });
+  const skill = installSkill({ skillsHome: opts.skillsHome });
+  return { setup, skill };
+}
 
-  const bootstrapPath = join(rootPath, BOOTSTRAP_FILE);
-  const bootstrapContents = `version: 2\nproject_id: ${pid}\nclients: ${selectedClients.join(",")}\n`;
-  if (!existsSync(bootstrapPath)) {
-    writeFileSync(bootstrapPath, bootstrapContents, "utf8");
-    created += 1;
-  } else {
-    const data = readBootstrap(bootstrapPath);
-    const existingClients = clientsFromBootstrap(data);
-    if (
-      data.project_id !== pid ||
-      data.version !== "2" ||
-      existingClients.join(",") !== selectedClients.join(",")
-    ) {
-      writeFileSync(bootstrapPath, bootstrapContents, "utf8");
-      updated += 1;
-    }
-  }
-
-  for (const filename of clientInstructionFiles(selectedClients)) {
-    const changed = ensureManagedBlock(join(rootPath, filename));
-    if (changed.changed) {
-      if (changed.created) created += 1;
-      else updated += 1;
-    }
-  }
-
-  const projectPath = vaultProjectPath(setup.vault, pid);
-  created += ensureProjectFiles(projectPath, branchName);
-
-  return {
-    created,
-    updated,
-    root: rootPath,
-    projectId: pid,
-    vaultProject: projectPath,
-    clients: selectedClients,
-  };
+export function enableSync(opts: {
+  home?: string;
+  vault?: string;
+  syncUrl: string;
+}): SetupResult {
+  return setupHome({ home: opts.home, vault: opts.vault, syncUrl: opts.syncUrl });
 }
 
 export function deriveProjectId(root = ".", projectId?: string): string {
@@ -277,15 +227,11 @@ export function buildStartPacket(opts: {
   maxCheckpoints?: number;
 } = {}): string {
   const rootPath = resolve(opts.root ?? ".");
-  const status = getStatus({ root: rootPath, home: opts.home });
-  if (!status.initialized) {
-    throw new HandoffError(statusError(status));
-  }
-
   const setup = loadSetup(opts.home);
-  const pid = status.projectId ?? deriveProjectId(rootPath);
+  const pid = deriveProjectId(rootPath);
   const branchName = opts.branch ?? currentBranch(rootPath);
   const projectPath = vaultProjectPath(setup.vault, pid);
+  ensureProjectFiles(projectPath, branchName);
   const branchFile = join(projectPath, "branches", `${safeName(branchName)}.md`);
 
   const sections: Array<[string, string]> = [
@@ -332,19 +278,16 @@ export function writeCheckpoint(opts: {
   branch?: string;
 }): CheckpointResult {
   const rootPath = resolve(opts.root ?? ".");
-  const status = getStatus({ root: rootPath, home: opts.home });
-  if (!status.initialized) {
-    throw new HandoffError(statusError(status));
-  }
   const cleanedNote = cleanNote(opts.note);
   if (!cleanedNote) throw new HandoffError("checkpoint note cannot be empty");
   rejectLikelySecret(cleanedNote);
 
   const setup = loadSetup(opts.home);
-  const pid = status.projectId ?? deriveProjectId(rootPath);
+  const pid = deriveProjectId(rootPath);
   const branchName = opts.branch ?? currentBranch(rootPath);
   const createdAt = timestamp(opts.now);
   const projectPath = vaultProjectPath(setup.vault, pid);
+  ensureProjectFiles(projectPath, branchName);
   const checkpoints = join(projectPath, "checkpoints");
   mkdirSync(checkpoints, { recursive: true });
   const deviceLabel = opts.device ?? hostname() ?? "device";
@@ -392,7 +335,7 @@ export function learn(
     throw new HandoffError("learn kind must be 'preference', 'lesson', 'decision', or 'context'");
   }
 
-  const setup = setupHome({ home: opts.home });
+  const setup = loadSetup(opts.home);
   const path = learnTargetPath(setup, resolve(opts.root ?? "."), scope, kind, opts.branch);
   const createdAt = timestamp(opts.now);
   appendFile(path, `\n- ${createdAt}: ${clean}\n`);
@@ -402,7 +345,7 @@ export function learn(
 export function syncVault(opts: { home?: string } = {}): string[] {
   const setup = loadSetup(opts.home);
   if (!existsSync(join(setup.vault, ".git"))) {
-    throw new HandoffError("vault is not a git repository; run setup --sync first");
+    throw new HandoffError("vault is not a git repository; run agent-handoff sync init <git-url> first");
   }
   const outputs: string[] = [];
 
@@ -440,48 +383,16 @@ export function syncVault(opts: { home?: string } = {}): string[] {
 export function getStatus(opts: { root?: string; home?: string } = {}): Status {
   const rootPath = resolve(opts.root ?? ".");
   const problems: string[] = [];
-  let projectId: string | null = null;
-  let clients: Client[] = ["codex", "claude"];
-
-  const bootstrapPath = join(rootPath, BOOTSTRAP_FILE);
-  if (!existsSync(bootstrapPath)) {
-    problems.push(`${BOOTSTRAP_FILE} is missing`);
-  } else {
-    const data = readBootstrap(bootstrapPath);
-    projectId = data.project_id ?? null;
-    if (!projectId) problems.push(`${BOOTSTRAP_FILE} is missing project_id`);
-    clients = clientsFromBootstrap(data);
-  }
-
-  for (const filename of clientInstructionFiles(clients)) {
-    if (!hasManagedBlock(join(rootPath, filename))) {
-      problems.push(`${filename} is missing the managed handoff block`);
-    }
-  }
+  const projectId = deriveProjectId(rootPath);
 
   const config = readConfig(opts.home);
   if (!config) {
-    problems.push("vault config is missing; run agent-handoff setup");
+    problems.push("agent-handoff is not enabled; run agent-handoff enable");
   } else if (!existsSync(config.vault)) {
     problems.push(`vault directory is missing: ${config.vault}`);
-  } else if (projectId) {
-    const projectPath = vaultProjectPath(config.vault, projectId);
-    if (!existsSync(projectPath)) {
-      problems.push(`vault project is missing: ${projectId}`);
-    }
   }
 
   return { initialized: problems.length === 0, problems, root: rootPath, projectId };
-}
-
-export function doctor(opts: { root?: string; home?: string } = {}): DoctorReport {
-  const status = getStatus(opts);
-  return {
-    ok: status.initialized,
-    problems: status.problems,
-    root: status.root,
-    projectId: status.projectId,
-  };
 }
 
 function globalSeedFiles(): Record<string, string> {
@@ -540,8 +451,9 @@ function learnTargetPath(
   if (!status.initialized) {
     throw new HandoffError(statusError(status));
   }
-  const pid = status.projectId ?? deriveProjectId(root);
+  const pid = deriveProjectId(root);
   const projectPath = vaultProjectPath(setup.vault, pid);
+  ensureProjectFiles(projectPath, branch ?? currentBranch(root));
 
   if (scope === "project") {
     if (kind === "preference") return join(projectPath, "preferences.md");
@@ -555,30 +467,6 @@ function learnTargetPath(
     writeFileSync(branchPath, `# Branch Context: ${branchName}\n\n`, "utf8");
   }
   return branchPath;
-}
-
-function normalizeClients(clients?: string[]): Client[] {
-  const selected = clients && clients.length > 0 ? clients : ["codex", "claude"];
-  const deduped: Client[] = [];
-  for (const client of selected) {
-    if (client !== "codex" && client !== "claude") {
-      throw new HandoffError(`unsupported client(s): ${client}`);
-    }
-    if (!deduped.includes(client)) deduped.push(client);
-  }
-  return deduped;
-}
-
-function clientsFromBootstrap(data: Record<string, string>): Client[] {
-  if (!data.clients) return ["codex", "claude"];
-  return normalizeClients(data.clients.split(",").map((client) => client.trim()).filter(Boolean));
-}
-
-function clientInstructionFiles(clients: Client[]): string[] {
-  const files: string[] = [];
-  if (clients.includes("codex")) files.push("AGENTS.md");
-  if (clients.includes("claude")) files.push("CLAUDE.md");
-  return files;
 }
 
 function resolveHome(home?: string): string {
@@ -599,7 +487,7 @@ function readConfig(home?: string): Config | null {
 
 function loadSetup(home?: string): SetupResult {
   const config = readConfig(home);
-  if (!config) return setupHome({ home });
+  if (!config) throw new HandoffError("agent-handoff is not enabled; run agent-handoff enable");
   return { home: resolveHome(home), vault: resolve(config.vault), created: 0, updated: 0 };
 }
 
@@ -633,67 +521,6 @@ function readBootstrap(path: string): Record<string, string> {
     data[line.slice(0, index).trim()] = line.slice(index + 1).trim().replace(/^["']|["']$/g, "");
   }
   return data;
-}
-
-function managedBlock(): string {
-  return [
-    MANAGED_BEGIN,
-    "Agent handoff is enabled for this repository.",
-    "",
-    "At the start of a new Codex or Claude Code session, run `agent-handoff sync` if vault sync is configured, then run:",
-    "",
-    "```bash",
-    "agent-handoff start",
-    "```",
-    "",
-    "Read the returned packet before making changes.",
-    "",
-    "Before pausing work, switching devices, or ending a useful session, run:",
-    "",
-    "```bash",
-    'agent-handoff checkpoint --note "<current goal, progress, open questions, next step>"',
-    "```",
-    "",
-    "Then run `agent-handoff sync` if vault sync is configured.",
-    "",
-    'When the user corrects a stable preference or recurring rule, run `agent-handoff learn --kind preference --note "..."`.',
-    MANAGED_END,
-    "",
-  ].join("\n");
-}
-
-function ensureManagedBlock(path: string): { changed: boolean; created: boolean } {
-  const block = managedBlock();
-  if (!existsSync(path)) {
-    writeFileSync(path, block, "utf8");
-    return { changed: true, created: true };
-  }
-
-  const original = readFileSync(path, "utf8");
-  let updated: string;
-  if (original.includes(MANAGED_BEGIN) && original.includes(MANAGED_END)) {
-    const before = original.split(MANAGED_BEGIN, 1)[0];
-    const after = original.split(MANAGED_END, 2)[1] ?? "";
-    const parts = [];
-    if (before.trimEnd()) parts.push(before.trimEnd());
-    parts.push(block.trimEnd());
-    if (after.trimStart()) parts.push(after.trimStart());
-    updated = `${parts.join("\n\n")}\n`;
-  } else {
-    updated = `${original.trimEnd()}\n\n${block}`;
-  }
-
-  if (updated !== original) {
-    writeFileSync(path, updated, "utf8");
-    return { changed: true, created: false };
-  }
-  return { changed: false, created: false };
-}
-
-function hasManagedBlock(path: string): boolean {
-  if (!existsSync(path)) return false;
-  const contents = readFileSync(path, "utf8");
-  return contents.includes(MANAGED_BEGIN) && contents.includes(MANAGED_END);
 }
 
 function renderSection(title: string, path: string, headingLevel = 2): string[] {
@@ -773,7 +600,7 @@ function appendFile(path: string, contents: string): void {
 function cloneVaultIfNeeded(home: string, vault: string, syncUrl: string): boolean {
   if (existsSync(join(vault, ".git"))) return false;
   if (existsSync(vault)) {
-    if (readdirSync(vault).length === 0) {
+    if (readdirSync(vault).length === 0 || isSeedOnlyVault(vault)) {
       rmSync(vault, { recursive: true, force: true });
     } else {
       return false;
@@ -781,6 +608,24 @@ function cloneVaultIfNeeded(home: string, vault: string, syncUrl: string): boole
   }
   const clone = gitRun(home, ["clone", syncUrl, vault]);
   return clone.status === 0;
+}
+
+function isSeedOnlyVault(vault: string): boolean {
+  const entries = readdirSync(vault).sort();
+  if (entries.some((entry) => !["global", "projects"].includes(entry))) return false;
+
+  const projects = join(vault, "projects");
+  if (existsSync(projects) && readdirSync(projects).length > 0) return false;
+
+  const global = join(vault, "global");
+  if (!existsSync(global)) return entries.length === 0 || entries.every((entry) => entry === "projects");
+
+  const seeds = globalSeedFiles();
+  for (const entry of readdirSync(global)) {
+    if (!(entry in seeds)) return false;
+    if (readFileSync(join(global, entry), "utf8") !== seeds[entry]) return false;
+  }
+  return true;
 }
 
 function ensureGitRemote(vault: string, syncUrl: string): void {
