@@ -1,11 +1,19 @@
 <!-- BEGIN AGENT-HANDOFF -->
 Agent handoff is enabled for this repository.
 
-Before starting work, read these files in order:
-1. `.agent-handoff/project.md`
-2. `.agent-handoff/session.md`
-3. `.agent-handoff/decisions.md`
-4. `.agent-handoff/preferences.md`
+At the start of a new Codex or Claude Code session, run:
 
-Before pausing work or switching sessions, update `.agent-handoff/session.md` with the current goal, progress, open questions, and next action.
+```bash
+agent-handoff start
+```
+
+Read the returned packet before making changes.
+
+Before pausing work, switching devices, or ending a useful session, run:
+
+```bash
+agent-handoff checkpoint --note "<current goal, progress, open questions, next step>"
+```
+
+When the user corrects a stable preference or recurring rule, run `agent-handoff learn --kind preference --note "..."`.
 <!-- END AGENT-HANDOFF -->

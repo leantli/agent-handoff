@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-handoff"
-version = "0.1.0"
-description = "Repo-local handoff files for Codex and Claude Code."
+version = "0.2.0"
+description = "Shared vault handoff memory for Codex and Claude Code."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

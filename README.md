@@ -1,14 +1,21 @@
 # agent-handoff
 
-`agent-handoff` is a small CLI for carrying coding-agent context across devices
-and sessions.
+`agent-handoff` gives Codex and Claude Code a shared memory handoff layer across
+new sessions, fresh clones, git worktrees, and devices.
 
-It targets a narrow problem: a long Codex or Claude Code session often learns a
-lot about a repository, the current task, and the user's preferences. When the
-user switches machines or starts a fresh session, that context is easy to lose.
+A long agent session often accumulates useful context: project background,
+current task state, decisions, preferences, and repeated corrections. Without a
+handoff layer, a new session or another device starts cold.
 
-This project stores the handoff in repo-local files that can travel through git
-or a normal file sync tool.
+`agent-handoff` stores that context in a user-level vault, then lets any clone or
+worktree of the same repository recover it by project identity.
+
+```text
+~/.agent-handoff/vault/        # private user memory
+repo/.agent-handoff.yml        # lightweight project identity
+repo/AGENTS.md                 # Codex bootstrap instruction
+repo/CLAUDE.md                 # Claude Code bootstrap instruction
+```
 
 ## Install
 
@@ -18,68 +25,148 @@ From a checkout:
 pip install -e .
 ```
 
-## Quick Start
+## Three-Minute Setup
 
-Initialize a repository:
+Create your local vault once:
+
+```bash
+agent-handoff setup
+```
+
+Optional: sync the vault through a private git repo so another device can share
+the same handoff memory:
+
+```bash
+agent-handoff setup --sync git@github.com:you/agent-handoff-vault.git
+```
+
+Bootstrap each coding project once:
 
 ```bash
 agent-handoff init
 ```
 
-This creates:
+This writes:
 
 ```text
-.agent-handoff/
-  project.md
-  session.md
-  decisions.md
-  preferences.md
-  index.json
+.agent-handoff.yml
+AGENTS.md
+CLAUDE.md
 ```
 
-It also adds managed instruction blocks to `AGENTS.md` and `CLAUDE.md`, telling
-Codex and Claude Code to read the handoff files before work and update
-`.agent-handoff/session.md` before pausing or switching sessions.
+It does not write private memory into the project repository.
 
-Capture a note from the current session:
+## Daily Workflow
+
+At the start of a new Codex or Claude Code session:
 
 ```bash
-agent-handoff capture --note "Parser is implemented; CLI tests are next."
+agent-handoff start
 ```
 
-Restore context in a new session:
+Paste or let the agent read the start packet before it works.
+
+When a useful session is about to end, or before switching devices:
 
 ```bash
-agent-handoff restore
+agent-handoff checkpoint --note "Implemented vault storage; next step is README polish."
 ```
 
-Check readiness:
+When the user corrects a stable preference or recurring rule:
 
 ```bash
-agent-handoff status
-agent-handoff doctor
+agent-handoff learn --kind preference --note "Prefer TDD for behavior changes."
 ```
 
-## Why Files First?
+If you configured git sync for the vault:
 
-The MVP intentionally does not require MCP, a daemon, or a hosted memory service.
-Files are easy to audit, edit, commit, sync, and recover. MCP can be added later
-as an optional automation layer over the same file protocol.
+```bash
+agent-handoff sync
+```
 
-## Intended Workflow
+`sync` commits pending vault changes and pushes them to the configured private
+vault repository.
 
-1. Run `agent-handoff init` once per repository.
-2. Keep stable project background in `.agent-handoff/project.md`.
-3. Keep current working state in `.agent-handoff/session.md`.
-4. Keep durable decisions in `.agent-handoff/decisions.md`.
-5. Keep user preferences and repeated corrections in `.agent-handoff/preferences.md`.
-6. At the start of a new Codex or Claude Code session, run
-   `agent-handoff restore` and paste the restore packet.
+## Why This Solves Cross-Clone Context
+
+`agent-handoff` identifies a project from `.agent-handoff.yml` or the git
+`origin` remote. These all map to the same vault project:
+
+```text
+~/code/repo
+~/tmp/repo
+~/worktrees/repo-feature
+another device's ~/projects/repo
+```
+
+For example, both remotes below normalize to the same project id:
+
+```text
+https://github.com/leantli/agent-handoff.git
+git@github.com:leantli/agent-handoff.git
+
+github.com__leantli__agent-handoff
+```
+
+That means A session can checkpoint context into the vault, and B session can
+recover it from any clone or worktree that resolves to the same project id.
+
+## What Gets Stored
+
+The vault is private user state:
+
+```text
+~/.agent-handoff/
+  config.json
+  vault/
+    global/
+      preferences.md
+      lessons.md
+    projects/
+      github.com__owner__repo/
+        project.md
+        decisions.md
+        preferences.md
+        branches/
+          main.md
+          feature-demo.md
+        checkpoints/
+          20260508T103000Z-laptop-codex-main.md
+```
+
+The project repository gets only bootstrap files:
+
+```text
+.agent-handoff.yml
+AGENTS.md
+CLAUDE.md
+```
+
+## Commands
+
+```bash
+agent-handoff setup       # create/configure the user vault
+agent-handoff init        # bootstrap the current repo
+agent-handoff start       # print the context packet for a new session
+agent-handoff checkpoint  # write a session checkpoint
+agent-handoff learn       # write a durable global preference or lesson
+agent-handoff sync        # git pull/rebase + push the vault
+agent-handoff status      # quick readiness check
+agent-handoff doctor      # detailed health check
+```
+
+Compatibility aliases:
+
+```bash
+agent-handoff restore     # alias for start
+agent-handoff capture     # alias for checkpoint
+```
 
 ## Status
 
-This is an early prototype. It solves the basic handoff loop, but it does not
-try to read private chat transcripts or synchronize proprietary client state.
+This is an early prototype. It does not read proprietary chat transcripts or
+client-internal state. Agents must still call `start`, `checkpoint`, and `learn`
+at the right moments, guided by `AGENTS.md` and `CLAUDE.md`.
 
 ## Development
 
