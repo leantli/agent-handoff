@@ -1,0 +1,43 @@
+{
+  "name": "@leantli/agent-handoff",
+  "version": "0.4.0",
+  "description": "Shared vault handoff memory for Codex and Claude Code.",
+  "type": "module",
+  "license": "MIT",
+  "author": "agent-handoff contributors",
+  "bin": {
+    "agent-handoff": "dist/bin.js"
+  },
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "resources",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepack": "npm run build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "codex",
+    "claude-code",
+    "handoff",
+    "context"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

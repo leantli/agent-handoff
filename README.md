@@ -19,10 +19,18 @@ repo/CLAUDE.md                 # Claude Code bootstrap instruction
 
 ## Install
 
+From npm:
+
+```bash
+npm install -g @leantli/agent-handoff
+```
+
 From a checkout:
 
 ```bash
-pip install -e .
+npm install
+npm run build
+npm link
 ```
 
 ## Three-Minute Setup
@@ -190,5 +198,12 @@ at the right moments, guided by `AGENTS.md` and `CLAUDE.md`.
 Run tests:
 
 ```bash
-python -m unittest discover -s tests -v
+npm test
+```
+
+Run type checking and build:
+
+```bash
+npm run typecheck
+npm run build
 ```
