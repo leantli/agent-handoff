@@ -20,6 +20,8 @@ agent-handoff enable
 `enable` creates local memory and installs the user skill that tells compatible
 agents when to run `start`, `checkpoint`, and `learn`.
 
+`agent-handoff status` also tells agents whether cross-device sync is configured.
+
 ## Daily Workflow
 
 At the start of a coding session:
@@ -57,8 +59,9 @@ agent-handoff sync init git@github.com:you/agent-handoff-vault.git
 agent-handoff sync
 ```
 
-After that, run `agent-handoff sync` before starting on another device and after
-writing useful checkpoints.
+Run `agent-handoff sync init <same-git-url>` once on each device that should
+share the vault. After that, run `agent-handoff sync` before starting on another
+device and after writing useful checkpoints.
 
 ## How Projects Are Identified
 
@@ -113,7 +116,7 @@ agent-handoff checkpoint  # write a session checkpoint
 agent-handoff learn       # store durable global/project/branch memory
 agent-handoff sync init   # enable optional cross-device sync
 agent-handoff sync        # pull/rebase and push the vault
-agent-handoff status      # quick readiness check
+agent-handoff status      # quick readiness and sync-state check
 ```
 
 ## Development

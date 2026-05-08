@@ -16,6 +16,7 @@ import {
   buildStartPacket,
   enableHandoff,
   enableSync,
+  getStatus,
   installSkill,
   learn,
   normalizeProjectId,
@@ -90,6 +91,23 @@ describe("vault setup", () => {
 
     const lessons = readFileSync(join(homeB, "vault", "global", "lessons.md"), "utf8");
     expect(lessons).toContain("Remote memory should survive");
+  });
+
+  test("status reports whether sync is configured", () => {
+    const tmp = tempDir();
+    const bare = join(tmp, "vault.git");
+    const home = join(tmp, "home");
+    execFileSync("git", ["init", "--bare", bare]);
+
+    enableHandoff({ home, skillsHome: join(tmp, "skills") });
+    expect(getStatus({ home }).syncConfigured).toBe(false);
+    expect(getStatus({ home }).syncUrl).toBeUndefined();
+
+    enableSync({ home, syncUrl: bare });
+
+    const status = getStatus({ home });
+    expect(status.syncConfigured).toBe(true);
+    expect(status.syncUrl).toBe(bare);
   });
 
   test("normalizeProjectId handles HTTPS and SSH remotes", () => {
@@ -347,7 +365,30 @@ describe("start, checkpoint, and learn", () => {
     expect(existsSync(join(home, "config.json"))).toBe(false);
   });
 
-  test("enableSync rejects joining an existing remote when local vault has unsynced memory", () => {
+  test("status reports an invalid config file without throwing", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    mkdirSync(home);
+    writeFileSync(join(home, "config.json"), "{not-json");
+
+    const status = getStatus({ home });
+
+    expect(status.initialized).toBe(false);
+    expect(status.problems.join("\n")).toContain("config.json is invalid");
+  });
+
+  test("start fails with a clear error when config is invalid", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const root = join(tmp, "repo");
+    mkdirSync(home);
+    mkdirSync(root);
+    writeFileSync(join(home, "config.json"), "{not-json");
+
+    expect(() => buildStartPacket({ root, home })).toThrow(HandoffError);
+  });
+
+  test("enableSync can replace default-only project scaffolding with remote memory", () => {
     const tmp = tempDir();
     const bare = join(tmp, "vault.git");
     const homeA = join(tmp, "home-a");
@@ -365,8 +406,60 @@ describe("start, checkpoint, and learn", () => {
     writeFileSync(join(rootB, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo\n");
     buildStartPacket({ root: rootB, home: homeB, branch: "main" });
 
+    enableSync({ home: homeB, syncUrl: bare });
+
+    const lessons = readFileSync(join(homeB, "vault", "global", "lessons.md"), "utf8");
+    expect(lessons).toContain("A device already owns the remote vault.");
+  });
+
+  test("enableSync rejects joining an existing remote when local vault has unsynced memory", () => {
+    const tmp = tempDir();
+    const bare = join(tmp, "vault.git");
+    const homeA = join(tmp, "home-a");
+    const homeB = join(tmp, "home-b");
+    const rootB = join(tmp, "repo-b");
+    execFileSync("git", ["init", "--bare", bare]);
+    mkdirSync(rootB);
+
+    enableHandoff({ home: homeA, skillsHome: join(tmp, "skills-a") });
+    learn("A device already owns the remote vault.", { home: homeA, kind: "lesson" });
+    enableSync({ home: homeA, syncUrl: bare });
+    syncVault({ home: homeA });
+
+    enableHandoff({ home: homeB, skillsHome: join(tmp, "skills-b") });
+    writeFileSync(join(rootB, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo\n");
+    buildStartPacket({ root: rootB, home: homeB, branch: "main" });
+    learn("This local decision has not been synced.", {
+      home: homeB,
+      root: rootB,
+      scope: "project",
+      kind: "decision",
+    });
+
     expect(() => enableSync({ home: homeB, syncUrl: bare })).toThrow(HandoffError);
     expect(readFileSync(join(homeB, "config.json"), "utf8")).not.toContain("sync_url");
+  });
+
+  test("enableSync rejects switching an existing git vault to an unrelated populated remote", () => {
+    const tmp = tempDir();
+    const firstRemote = join(tmp, "first.git");
+    const secondRemote = join(tmp, "second.git");
+    const homeA = join(tmp, "home-a");
+    const homeB = join(tmp, "home-b");
+    execFileSync("git", ["init", "--bare", firstRemote]);
+    execFileSync("git", ["init", "--bare", secondRemote]);
+
+    enableHandoff({ home: homeA, skillsHome: join(tmp, "skills-a") });
+    learn("First remote memory.", { home: homeA, kind: "lesson" });
+    enableSync({ home: homeA, syncUrl: firstRemote });
+    syncVault({ home: homeA });
+
+    enableHandoff({ home: homeB, skillsHome: join(tmp, "skills-b") });
+    learn("Second remote memory.", { home: homeB, kind: "lesson" });
+    enableSync({ home: homeB, syncUrl: secondRemote });
+    syncVault({ home: homeB });
+
+    expect(() => enableSync({ home: homeA, syncUrl: secondRemote })).toThrow(HandoffError);
   });
 
   test("buildStartPacket fails when the configured vault is missing", () => {

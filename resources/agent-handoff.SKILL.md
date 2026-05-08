@@ -14,7 +14,8 @@ When beginning work in a repository:
 1. Run `agent-handoff status`.
 2. If status reports a problem, stop and report it. If the problem is that
    agent-handoff is not enabled, tell the user to run `agent-handoff enable`.
-3. If sync is configured and the user is switching devices or clones, run `agent-handoff sync`.
+3. If status says `Sync: configured` and the user is switching devices or clones,
+   run `agent-handoff sync`.
 4. Run `agent-handoff start`.
 5. Read the returned packet before changing files.
 

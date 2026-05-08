@@ -157,6 +157,7 @@ describe("cli", () => {
     const ready = runCli(repo, "--home", home, "status");
     expect(ready.code).toBe(0);
     expect(ready.stdout).toContain("Agent handoff is ready");
+    expect(ready.stdout).toContain("Sync: not configured");
   });
 
   test("start requires enable", () => {
@@ -198,6 +199,10 @@ describe("cli", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("Cross-device sync enabled");
     expect(readFileSync(join(home, "config.json"), "utf8")).toContain(bare);
+
+    const status = runCli(repo, "--home", home, "status");
+    expect(status.code).toBe(0);
+    expect(status.stdout).toContain(`Sync: configured (${bare})`);
   });
 
   test("sync init fails for an unreachable sync remote", () => {

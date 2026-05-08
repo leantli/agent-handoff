@@ -143,6 +143,11 @@ function buildProgram(
       const status = getStatus({ root: cwd, home: globalHome(program) });
       if (status.initialized) {
         stdout.write(`Agent handoff is ready for ${status.projectId}.\n`);
+        if (status.syncConfigured) {
+          stdout.write(`Sync: configured (${status.syncUrl})\n`);
+        } else {
+          stdout.write("Sync: not configured\n");
+        }
       } else {
         printProblems(status.problems, stdout);
         throw new CommanderError(1, "agent-handoff.status", "status failed");
