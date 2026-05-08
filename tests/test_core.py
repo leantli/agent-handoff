@@ -30,6 +30,21 @@ class VaultSetupTests(unittest.TestCase):
             self.assertEqual(config["version"], 2)
             self.assertEqual(config["vault"], str((home / "vault").resolve()))
 
+    def test_setup_home_with_existing_sync_remote_clones_remote_vault(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bare = Path(tmp) / "vault.git"
+            home_a = Path(tmp) / "home-a"
+            home_b = Path(tmp) / "home-b"
+            subprocess.run(["git", "init", "--bare", str(bare)], check=True, stdout=subprocess.PIPE)
+            core.setup_home(home_a, sync_url=str(bare))
+            core.learn("A device learned this.", home=home_a, kind="lesson")
+            core.sync_vault(home_a)
+
+            core.setup_home(home_b, sync_url=str(bare))
+
+            lessons = home_b / "vault" / "global" / "lessons.md"
+            self.assertIn("A device learned this.", lessons.read_text())
+
     def test_normalize_project_id_handles_https_and_ssh_remotes(self):
         self.assertEqual(
             core.normalize_project_id("https://github.com/leantli/agent-handoff.git"),
@@ -39,6 +54,16 @@ class VaultSetupTests(unittest.TestCase):
             core.normalize_project_id("git@github.com:leantli/agent-handoff.git"),
             "github.com__leantli__agent-handoff",
         )
+
+    def test_install_skill_writes_user_skill(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_home = Path(tmp) / "skills"
+
+            result = core.install_skill(skills_home)
+
+            self.assertTrue(result.path.exists())
+            self.assertIn("agent-handoff start", result.path.read_text())
+            self.assertEqual(result.path, (skills_home / "agent-handoff" / "SKILL.md").resolve())
 
 
 class InitTests(unittest.TestCase):
@@ -127,6 +152,34 @@ class StartCheckpointLearnTests(unittest.TestCase):
             self.assertIn("Working on vault design.", packet)
             self.assertIn("repo-local memory is insufficient", packet)
 
+    def test_start_packet_filters_recent_checkpoints_to_current_branch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            home = Path(tmp) / "home"
+            root.mkdir()
+            core.init_repo(root, home=home, project_id="github.com__owner__repo", branch="main")
+            core.write_checkpoint(
+                root,
+                "Main branch checkpoint.",
+                home=home,
+                now=datetime(2026, 5, 8, 10, 30, tzinfo=timezone.utc),
+                agent="codex",
+                branch="main",
+            )
+            core.write_checkpoint(
+                root,
+                "Feature branch checkpoint.",
+                home=home,
+                now=datetime(2026, 5, 8, 10, 31, tzinfo=timezone.utc),
+                agent="codex",
+                branch="feature/demo",
+            )
+
+            packet = core.build_start_packet(root, home=home, branch="main")
+
+            self.assertIn("Main branch checkpoint.", packet)
+            self.assertNotIn("Feature branch checkpoint.", packet)
+
     def test_checkpoint_writes_timestamped_file_in_vault_project(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
@@ -150,6 +203,16 @@ class StartCheckpointLearnTests(unittest.TestCase):
             self.assertIn("Current task is green.", result.path.read_text())
             self.assertIn("branch: feature/demo", result.path.read_text())
 
+    def test_checkpoint_rejects_likely_secret_notes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            home = Path(tmp) / "home"
+            root.mkdir()
+            core.init_repo(root, home=home, project_id="github.com__owner__repo")
+
+            with self.assertRaises(core.HandoffError):
+                core.write_checkpoint(root, "OPENAI_API_KEY=sk-secret", home=home)
+
     def test_learn_appends_global_preferences_and_lessons(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
@@ -160,6 +223,40 @@ class StartCheckpointLearnTests(unittest.TestCase):
 
             self.assertIn("Prefer TDD", pref.path.read_text())
             self.assertIn("Repo-local memory", lesson.path.read_text())
+
+    def test_learn_rejects_likely_secret_notes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            core.setup_home(home)
+
+            with self.assertRaises(core.HandoffError):
+                core.learn("password=hunter2", home=home, kind="lesson")
+
+    def test_learn_can_write_project_and_branch_scoped_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            home = Path(tmp) / "home"
+            root.mkdir()
+            core.init_repo(root, home=home, project_id="github.com__owner__repo", branch="main")
+
+            project = core.learn(
+                "Use vault-first architecture.",
+                home=home,
+                root=root,
+                scope="project",
+                kind="decision",
+            )
+            branch = core.learn(
+                "Main is preparing v0.3.",
+                home=home,
+                root=root,
+                scope="branch",
+                kind="context",
+                branch="main",
+            )
+
+            self.assertIn("vault-first", project.path.read_text())
+            self.assertIn("v0.3", branch.path.read_text())
 
     def test_sync_commits_and_pushes_vault_changes(self):
         with tempfile.TemporaryDirectory() as tmp:

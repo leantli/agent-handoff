@@ -31,6 +31,7 @@ Create your local vault once:
 
 ```bash
 agent-handoff setup
+agent-handoff install-skill
 ```
 
 Optional: sync the vault through a private git repo so another device can share
@@ -61,6 +62,7 @@ It does not write private memory into the project repository.
 At the start of a new Codex or Claude Code session:
 
 ```bash
+agent-handoff sync     # only if vault sync is configured
 agent-handoff start
 ```
 
@@ -70,6 +72,7 @@ When a useful session is about to end, or before switching devices:
 
 ```bash
 agent-handoff checkpoint --note "Implemented vault storage; next step is README polish."
+agent-handoff sync     # only if vault sync is configured
 ```
 
 When the user corrects a stable preference or recurring rule:
@@ -78,14 +81,15 @@ When the user corrects a stable preference or recurring rule:
 agent-handoff learn --kind preference --note "Prefer TDD for behavior changes."
 ```
 
-If you configured git sync for the vault:
+For project-specific decisions or branch-specific context:
 
 ```bash
-agent-handoff sync
+agent-handoff learn --scope project --kind decision --note "Use vault-first storage."
+agent-handoff learn --scope branch --kind context --note "Main is preparing v0.3."
 ```
 
-`sync` commits pending vault changes and pushes them to the configured private
-vault repository.
+When configured, `sync` commits pending vault changes and pushes them to the
+private vault repository.
 
 ## Why This Solves Cross-Clone Context
 
@@ -146,20 +150,14 @@ CLAUDE.md
 
 ```bash
 agent-handoff setup       # create/configure the user vault
+agent-handoff install-skill # install the agent workflow skill
 agent-handoff init        # bootstrap the current repo
 agent-handoff start       # print the context packet for a new session
 agent-handoff checkpoint  # write a session checkpoint
-agent-handoff learn       # write a durable global preference or lesson
+agent-handoff learn       # write durable global/project/branch memory
 agent-handoff sync        # git pull/rebase + push the vault
 agent-handoff status      # quick readiness check
 agent-handoff doctor      # detailed health check
-```
-
-Compatibility aliases:
-
-```bash
-agent-handoff restore     # alias for start
-agent-handoff capture     # alias for checkpoint
 ```
 
 ## Agent Skill
@@ -171,12 +169,15 @@ This repo includes a Codex-compatible skill:
 ```
 
 The skill tells an agent when to run `start`, `checkpoint`, `learn`, and `sync`.
-Keep it in the repo for project-local use, or copy it into your user skills
-directory to make the workflow available across all repositories:
+Install it into your user skills directory to make the workflow available across
+all repositories:
 
-```text
-~/.agents/skills/agent-handoff/
+```bash
+agent-handoff install-skill
 ```
+
+The repo also keeps a copy at `.agents/skills/agent-handoff/SKILL.md` for
+project-local use.
 
 ## Status
 

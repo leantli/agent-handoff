@@ -1,2 +1,3 @@
 version: 2
 project_id: github.com__leantli__agent-handoff
+clients: codex,claude

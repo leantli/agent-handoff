@@ -7,8 +7,8 @@ from typing import TextIO
 
 from . import __version__
 from .core import HandoffError
-from .core import build_restore_packet, build_start_packet, capture_note, doctor, get_status
-from .core import init_repo, learn, setup_home, sync_vault, write_checkpoint
+from .core import build_start_packet, doctor, get_status
+from .core import init_repo, install_skill, learn, setup_home, sync_vault, write_checkpoint
 
 
 def main(
@@ -35,25 +35,32 @@ def main(
             print(f"Vault: {result.vault}", file=out)
             return 0
 
+        if args.command == "install-skill":
+            result = install_skill(args.skills_home)
+            verb = "Installed skill" if result.updated else "Skill already installed"
+            print(f"{verb}: {result.path}", file=out)
+            return 0
+
         if args.command == "init":
             result = init_repo(
                 root,
                 home=home,
                 project_id=args.project_id,
                 branch=args.branch,
+                clients=args.client,
             )
             print(f"Initialized agent handoff for {result.project_id}.", file=out)
             print(f"Vault project: {result.vault_project}", file=out)
             return 0
 
-        if args.command in {"start", "restore"}:
+        if args.command == "start":
             print(
                 build_start_packet(root, home=home, branch=getattr(args, "branch", None)),
                 file=out,
             )
             return 0
 
-        if args.command in {"checkpoint", "capture"}:
+        if args.command == "checkpoint":
             note = _read_note(args, inp)
             result = write_checkpoint(
                 root,
@@ -68,7 +75,7 @@ def main(
 
         if args.command == "learn":
             note = _read_note(args, inp)
-            result = learn(note, home=home, kind=args.kind)
+            result = learn(note, home=home, root=root, scope=args.scope, kind=args.kind, branch=args.branch)
             print(f"Learned {result.kind}: {result.path}", file=out)
             return 0
 
@@ -124,15 +131,27 @@ def _build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--vault", help="Vault directory. Defaults to HOME/vault.")
     setup.add_argument("--sync", help="Optional git remote URL for vault sync.")
 
+    install_skill_parser = subparsers.add_parser(
+        "install-skill",
+        help="Install the agent-handoff skill into a user skills directory.",
+    )
+    install_skill_parser.add_argument(
+        "--skills-home",
+        help="Skills home directory. Defaults to ~/.agents/skills.",
+    )
+
     init = subparsers.add_parser("init", help="Bootstrap this repo for agent handoff.")
     init.add_argument("--project-id", help="Override detected project id.")
     init.add_argument("--branch", help="Override detected branch.")
+    init.add_argument(
+        "--client",
+        action="append",
+        choices=["codex", "claude"],
+        help="Client bootstrap to install. Repeat to install multiple. Defaults to both.",
+    )
 
     start = subparsers.add_parser("start", help="Print context for a new agent session.")
     start.add_argument("--branch", help="Override detected branch.")
-
-    restore = subparsers.add_parser("restore", help="Alias for start.")
-    restore.add_argument("--branch", help="Override detected branch.")
 
     checkpoint = subparsers.add_parser("checkpoint", help="Write a session checkpoint.")
     _add_note_args(checkpoint)
@@ -140,20 +159,21 @@ def _build_parser() -> argparse.ArgumentParser:
     checkpoint.add_argument("--agent", help="Agent/client name, such as codex or claude.")
     checkpoint.add_argument("--branch", help="Override detected branch.")
 
-    capture = subparsers.add_parser("capture", help="Alias for checkpoint.")
-    _add_note_args(capture)
-    capture.add_argument("--device", help="Device name for the checkpoint.")
-    capture.add_argument("--agent", help="Agent/client name, such as codex or claude.")
-    capture.add_argument("--branch", help="Override detected branch.")
-
-    learn_parser = subparsers.add_parser("learn", help="Store a durable preference or lesson.")
+    learn_parser = subparsers.add_parser("learn", help="Store durable handoff memory.")
     _add_note_args(learn_parser)
     learn_parser.add_argument(
+        "--scope",
+        choices=["global", "project", "branch"],
+        default="global",
+        help="Where to store the learned memory.",
+    )
+    learn_parser.add_argument(
         "--kind",
-        choices=["preference", "lesson"],
+        choices=["preference", "lesson", "decision", "context"],
         default="preference",
         help="Kind of durable memory to write.",
     )
+    learn_parser.add_argument("--branch", help="Branch to use with --scope branch.")
 
     subparsers.add_parser("sync", help="Pull and push the vault git repository.")
     subparsers.add_parser("status", help="Show whether handoff is ready here.")
@@ -171,6 +191,8 @@ def _read_note(args: argparse.Namespace, stdin: TextIO) -> str:
         return args.note
     if getattr(args, "file", None):
         return Path(args.file).read_text(encoding="utf-8")
+    if hasattr(stdin, "isatty") and stdin.isatty():
+        raise HandoffError("provide --note or --file, or pipe note text on stdin")
     return stdin.read()
 
 

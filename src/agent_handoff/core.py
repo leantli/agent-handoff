@@ -6,6 +6,7 @@ import socket
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from importlib import resources
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -16,6 +17,11 @@ BOOTSTRAP_FILE = ".agent-handoff.yml"
 
 MANAGED_BEGIN = "<!-- BEGIN AGENT-HANDOFF -->"
 MANAGED_END = "<!-- END AGENT-HANDOFF -->"
+SECRET_PATTERNS = (
+    re.compile(r"(?i)(api[_-]?key|token|secret|password)\s*[:=]"),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"),
+)
 
 
 @dataclass(frozen=True)
@@ -33,6 +39,7 @@ class InitResult:
     root: Path
     project_id: str
     vault_project: Path
+    clients: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -48,6 +55,12 @@ class LearnResult:
     path: Path
     kind: str
     created_at: str
+
+
+@dataclass(frozen=True)
+class InstallSkillResult:
+    path: Path
+    updated: bool
 
 
 @dataclass(frozen=True)
@@ -81,7 +94,16 @@ def setup_home(
     created = 0
     updated = 0
 
-    for directory in (home_path, vault_path, vault_path / "global", vault_path / "projects"):
+    if not home_path.exists():
+        home_path.mkdir(parents=True)
+        created += 1
+
+    if sync_url:
+        cloned = _clone_vault_if_needed(home_path, vault_path, sync_url)
+        if cloned:
+            created += 1
+
+    for directory in (vault_path, vault_path / "global", vault_path / "projects"):
         if not directory.exists():
             directory.mkdir(parents=True)
             created += 1
@@ -149,32 +171,59 @@ def normalize_project_id(value: str) -> str:
     return _safe_project_id("__".join(parts))
 
 
+def install_skill(skills_home: Path | str | None = None) -> InstallSkillResult:
+    home_path = (
+        Path(skills_home).expanduser().resolve()
+        if skills_home
+        else (Path.home() / ".agents" / "skills").resolve()
+    )
+    skill_dir = home_path / "agent-handoff"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    path = skill_dir / "SKILL.md"
+    content = resources.files("agent_handoff.resources").joinpath(
+        "agent-handoff.SKILL.md"
+    ).read_text(encoding="utf-8")
+    updated = not path.exists() or path.read_text(encoding="utf-8") != content
+    if updated:
+        path.write_text(content, encoding="utf-8")
+    return InstallSkillResult(path=path, updated=updated)
+
+
 def init_repo(
     root: Path | str = ".",
     *,
     home: Path | str | None = None,
     project_id: str | None = None,
     branch: str | None = None,
+    clients: list[str] | tuple[str, ...] | None = None,
 ) -> InitResult:
     root_path = Path(root).resolve()
     setup = setup_home(home)
     pid = derive_project_id(root_path, project_id=project_id)
     branch_name = branch or current_branch(root_path)
+    selected_clients = _normalize_clients(clients)
     created = 0
     updated = 0
 
     bootstrap_path = root_path / BOOTSTRAP_FILE
-    bootstrap_contents = f"version: 2\nproject_id: {pid}\n"
+    bootstrap_contents = (
+        f"version: 2\nproject_id: {pid}\nclients: {','.join(selected_clients)}\n"
+    )
     if not bootstrap_path.exists():
         bootstrap_path.write_text(bootstrap_contents, encoding="utf-8")
         created += 1
     else:
         data = _read_bootstrap(bootstrap_path)
-        if data.get("project_id") != pid or data.get("version") != "2":
+        existing_clients = _clients_from_bootstrap(data)
+        if (
+            data.get("project_id") != pid
+            or data.get("version") != "2"
+            or existing_clients != selected_clients
+        ):
             bootstrap_path.write_text(bootstrap_contents, encoding="utf-8")
             updated += 1
 
-    for filename in ("AGENTS.md", "CLAUDE.md"):
+    for filename in _client_instruction_files(selected_clients):
         changed, was_created = _ensure_managed_block(root_path / filename)
         if changed:
             if was_created:
@@ -192,6 +241,7 @@ def init_repo(
         root=root_path,
         project_id=pid,
         vault_project=project_path,
+        clients=selected_clients,
     )
 
 
@@ -257,7 +307,7 @@ def build_start_packet(
     for title, path in sections:
         lines.extend(_render_section(title, path))
 
-    checkpoint_paths = _latest_checkpoints(project_path, max_checkpoints)
+    checkpoint_paths = _latest_checkpoints(project_path, max_checkpoints, branch=branch_name)
     if checkpoint_paths:
         lines.extend(["", "## Recent Checkpoints"])
         for path in checkpoint_paths:
@@ -284,6 +334,7 @@ def write_checkpoint(
     clean_note = _clean_note(note)
     if not clean_note:
         raise HandoffError("checkpoint note cannot be empty")
+    _reject_likely_secret(clean_note)
 
     setup = _load_setup(home)
     pid = status.project_id or derive_project_id(root_path)
@@ -317,22 +368,28 @@ def learn(
     note: str,
     *,
     home: Path | str | None = None,
+    root: Path | str = ".",
+    scope: str = "global",
     kind: str = "preference",
+    branch: str | None = None,
     now: datetime | None = None,
 ) -> LearnResult:
     clean_note = _clean_note(note)
     if not clean_note:
         raise HandoffError("learn note cannot be empty")
-    if kind not in {"preference", "lesson"}:
-        raise HandoffError("learn kind must be 'preference' or 'lesson'")
+    _reject_likely_secret(clean_note)
+    if scope not in {"global", "project", "branch"}:
+        raise HandoffError("learn scope must be 'global', 'project', or 'branch'")
+    if kind not in {"preference", "lesson", "decision", "context"}:
+        raise HandoffError("learn kind must be 'preference', 'lesson', 'decision', or 'context'")
 
     setup = setup_home(home)
-    filename = "preferences.md" if kind == "preference" else "lessons.md"
-    path = setup.vault / "global" / filename
+    path = _learn_target_path(setup, Path(root).resolve(), scope, kind, branch)
     created_at = _timestamp(now)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(f"\n- {created_at}: {clean_note}\n")
-    return LearnResult(path=path, kind=kind, created_at=created_at)
+    display_kind = kind if scope == "global" else f"{scope} {kind}"
+    return LearnResult(path=path, kind=display_kind, created_at=created_at)
 
 
 def sync_vault(home: Path | str | None = None) -> list[str]:
@@ -390,8 +447,9 @@ def get_status(root: Path | str = ".", *, home: Path | str | None = None) -> Sta
         project_id = data.get("project_id")
         if not project_id:
             problems.append(f"{BOOTSTRAP_FILE} is missing project_id")
+        clients = _clients_from_bootstrap(data)
 
-    for filename in ("AGENTS.md", "CLAUDE.md"):
+    for filename in _client_instruction_files(clients if bootstrap_path.exists() else ("codex", "claude")):
         if not _has_managed_block(root_path / filename):
             problems.append(f"{filename} is missing the managed handoff block")
 
@@ -425,15 +483,6 @@ def doctor(root: Path | str = ".", *, home: Path | str | None = None) -> DoctorR
     )
 
 
-# Backward-compatible aliases for the first prototype.
-def capture_note(root: Path | str = ".", note: str = "", **kwargs: object) -> CheckpointResult:
-    return write_checkpoint(root, note, **kwargs)
-
-
-def build_restore_packet(root: Path | str = ".", **kwargs: object) -> str:
-    return build_start_packet(root, **kwargs)
-
-
 def _global_seed_files() -> dict[str, str]:
     return {
         "preferences.md": "# Global Preferences\n\n",
@@ -465,6 +514,67 @@ def _ensure_project_files(project_path: Path, branch: str) -> int:
         branch_path.write_text(f"# Branch Context: {branch}\n\n", encoding="utf-8")
         created += 1
     return created
+
+
+def _learn_target_path(
+    setup: SetupResult,
+    root: Path,
+    scope: str,
+    kind: str,
+    branch: str | None,
+) -> Path:
+    if scope == "global":
+        if kind not in {"preference", "lesson"}:
+            raise HandoffError("global learn kind must be 'preference' or 'lesson'")
+        filename = "preferences.md" if kind == "preference" else "lessons.md"
+        return setup.vault / "global" / filename
+
+    status = get_status(root, home=setup.home)
+    if not status.initialized:
+        raise HandoffError(_status_error(status))
+    pid = status.project_id or derive_project_id(root)
+    project_path = _vault_project_path(setup.vault, pid)
+
+    if scope == "project":
+        if kind == "preference":
+            return project_path / "preferences.md"
+        if kind == "decision":
+            return project_path / "decisions.md"
+        return project_path / "project.md"
+
+    branch_name = branch or current_branch(root)
+    branch_path = project_path / "branches" / f"{_safe_name(branch_name)}.md"
+    if not branch_path.exists():
+        branch_path.write_text(f"# Branch Context: {branch_name}\n\n", encoding="utf-8")
+    return branch_path
+
+
+def _normalize_clients(clients: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
+    selected = tuple(clients or ("codex", "claude"))
+    invalid = [client for client in selected if client not in {"codex", "claude"}]
+    if invalid:
+        raise HandoffError(f"unsupported client(s): {', '.join(invalid)}")
+    deduped: list[str] = []
+    for client in selected:
+        if client not in deduped:
+            deduped.append(client)
+    return tuple(deduped)
+
+
+def _clients_from_bootstrap(data: dict[str, str]) -> tuple[str, ...]:
+    raw = data.get("clients")
+    if not raw:
+        return ("codex", "claude")
+    return _normalize_clients(tuple(client.strip() for client in raw.split(",") if client.strip()))
+
+
+def _client_instruction_files(clients: tuple[str, ...]) -> tuple[str, ...]:
+    files: list[str] = []
+    if "codex" in clients:
+        files.append("AGENTS.md")
+    if "claude" in clients:
+        files.append("CLAUDE.md")
+    return tuple(files)
 
 
 def _resolve_home(home: Path | str | None) -> Path:
@@ -530,7 +640,8 @@ def _managed_block() -> str:
     return (
         f"{MANAGED_BEGIN}\n"
         "Agent handoff is enabled for this repository.\n\n"
-        "At the start of a new Codex or Claude Code session, run:\n\n"
+        "At the start of a new Codex or Claude Code session, run `agent-handoff sync` "
+        "if vault sync is configured, then run:\n\n"
         "```bash\n"
         "agent-handoff start\n"
         "```\n\n"
@@ -539,6 +650,7 @@ def _managed_block() -> str:
         "```bash\n"
         "agent-handoff checkpoint --note \"<current goal, progress, open questions, next step>\"\n"
         "```\n\n"
+        "Then run `agent-handoff sync` if vault sync is configured.\n\n"
         "When the user corrects a stable preference or recurring rule, run "
         "`agent-handoff learn --kind preference --note \"...\"`.\n"
         f"{MANAGED_END}\n"
@@ -585,12 +697,21 @@ def _render_section(title: str, path: Path, *, heading_level: int = 2) -> list[s
     return ["", f"{heading} {title}", "", path.read_text(encoding="utf-8").rstrip()]
 
 
-def _latest_checkpoints(project_path: Path, limit: int) -> list[Path]:
+def _latest_checkpoints(project_path: Path, limit: int, *, branch: str | None = None) -> list[Path]:
     checkpoint_dir = project_path / "checkpoints"
     if not checkpoint_dir.exists():
         return []
     paths = sorted(checkpoint_dir.glob("*.md"), key=lambda path: path.name)
+    if branch is not None:
+        paths = [path for path in paths if _checkpoint_branch(path) == branch]
     return paths[-limit:]
+
+
+def _checkpoint_branch(path: Path) -> str | None:
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("branch:"):
+            return line.split(":", 1)[1].strip()
+    return None
 
 
 def _timestamp(now: datetime | None) -> str:
@@ -609,6 +730,11 @@ def _clean_note(note: str) -> str:
     return "\n".join(line.rstrip() for line in note.strip().splitlines()).strip()
 
 
+def _reject_likely_secret(note: str) -> None:
+    if any(pattern.search(note) for pattern in SECRET_PATTERNS):
+        raise HandoffError("handoff notes look like they contain a secret; remove it and try again")
+
+
 def _status_error(status: Status) -> str:
     return "agent handoff is not ready:\n" + "\n".join(f"- {p}" for p in status.problems)
 
@@ -622,6 +748,21 @@ def _git_output(root: Path, args: list[str]) -> str | None:
     if process.returncode != 0:
         return None
     return process.stdout.strip() or None
+
+
+def _clone_vault_if_needed(home: Path, vault: Path, sync_url: str) -> bool:
+    if (vault / ".git").exists():
+        return False
+    if vault.exists():
+        try:
+            next(vault.iterdir())
+        except StopIteration:
+            vault.rmdir()
+        else:
+            return False
+
+    clone = _git_run(home, ["clone", sync_url, str(vault)])
+    return clone.returncode == 0
 
 
 def _ensure_git_remote(vault: Path, sync_url: str) -> None:

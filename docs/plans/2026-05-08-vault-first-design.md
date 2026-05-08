@@ -50,8 +50,9 @@ repo/
 ```
 
 `.agent-handoff.yml` contains non-private routing metadata such as
-`project_id`. `AGENTS.md` and `CLAUDE.md` tell agents to run
-`agent-handoff start` before work and `agent-handoff checkpoint` before pausing.
+`project_id` and selected clients. `AGENTS.md` and `CLAUDE.md` tell agents to
+sync when configured, run `agent-handoff start` before work, and run
+`agent-handoff checkpoint` before pausing.
 
 ## Project Identity
 
@@ -80,18 +81,26 @@ vault project.
 ### `setup`
 
 Creates the user home and vault structure. Optional `--vault PATH` points at an
-existing vault directory. Optional `--sync URL` initializes the vault as a git
-repository with an `origin` remote.
+existing vault directory. Optional `--sync URL` uses a git remote for vault
+sync. If the remote already has data, setup clones that remote instead of
+creating a conflicting local vault.
+
+### `install-skill`
+
+Installs the packaged `agent-handoff` skill into the user's skills directory so
+agents can discover the workflow across repositories.
 
 ### `init`
 
-Bootstraps the current project. It writes `.agent-handoff.yml`, updates
-`AGENTS.md` and `CLAUDE.md`, and creates the project directory in the vault.
-It does not write `.agent-handoff/project.md` into the business repo.
+Bootstraps the current project. It writes `.agent-handoff.yml`, updates selected
+client files such as `AGENTS.md` and `CLAUDE.md`, and creates the project
+directory in the vault. It does not write `.agent-handoff/project.md` into the
+business repo. Users can pass `--client codex` or `--client claude` to avoid
+creating bootstrap files for clients they do not use.
 
 ### `start`
 
-Builds a restore packet from the vault:
+Builds a start packet from the vault:
 
 1. global preferences
 2. global lessons
@@ -99,7 +108,7 @@ Builds a restore packet from the vault:
 4. project preferences
 5. project decisions
 6. current branch context
-7. recent checkpoints
+7. recent checkpoints for the current branch
 
 ### `checkpoint`
 
@@ -108,13 +117,15 @@ stdin, or `--file`. Checkpoints are session snapshots, not shared mutable state.
 
 ### `learn`
 
-Writes a durable preference or lesson into the vault. This is for corrections
-that should survive all future sessions, clones, and devices.
+Writes durable memory into the vault. Global scope supports preferences and
+lessons. Project scope supports preferences, decisions, lessons, and context.
+Branch scope writes current branch context.
 
 ### `sync`
 
-Runs git pull/rebase and push for the vault repository when a sync remote is
-configured.
+Commits pending vault changes, pulls/rebases from the configured remote, and
+pushes the vault repository. New sessions should sync before `start`; completed
+sessions should checkpoint and then sync.
 
 ## Worktree and Clone Behavior
 
@@ -122,8 +133,8 @@ Multiple worktrees and clones share global/project context through the same
 project id, but branch state is isolated under `branches/<branch>.md`.
 
 This avoids a single shared `session.md` being overwritten by concurrent agents.
-The restore packet composes stable context with current branch context and the
-latest checkpoint snapshots.
+The start packet composes stable context with current branch context and the
+latest checkpoint snapshots for the current branch.
 
 ## Privacy Defaults
 
