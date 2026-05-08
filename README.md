@@ -162,6 +162,22 @@ agent-handoff restore     # alias for start
 agent-handoff capture     # alias for checkpoint
 ```
 
+## Agent Skill
+
+This repo includes a Codex-compatible skill:
+
+```text
+.agents/skills/agent-handoff/SKILL.md
+```
+
+The skill tells an agent when to run `start`, `checkpoint`, `learn`, and `sync`.
+Keep it in the repo for project-local use, or copy it into your user skills
+directory to make the workflow available across all repositories:
+
+```text
+~/.agents/skills/agent-handoff/
+```
+
 ## Status
 
 This is an early prototype. It does not read proprietary chat transcripts or
