@@ -20,6 +20,7 @@ const SECRET_PATTERNS = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
   /\bsk-[A-Za-z0-9_-]{8,}\b/,
 ];
+const GIT_TIMEOUT_MS = 30_000;
 
 type LearnScope = "global" | "project" | "branch";
 type LearnKind = "preference" | "lesson" | "decision" | "context";
@@ -87,6 +88,15 @@ export function setupHome(opts: {
   if (!existsSync(homePath)) {
     mkdirSync(homePath, { recursive: true });
     created += 1;
+  }
+
+  if (opts.syncUrl) {
+    validateSyncRemote(homePath, opts.syncUrl);
+    if (hasUnsyncedLocalVault(vaultPath) && remoteHasRefs(homePath, opts.syncUrl)) {
+      throw new HandoffError(
+        "local vault has unsynced memory and the sync remote already has data; move or back up the local vault before joining this remote",
+      );
+    }
   }
 
   if (opts.syncUrl && cloneVaultIfNeeded(homePath, vaultPath, opts.syncUrl)) {
@@ -293,7 +303,7 @@ export function writeCheckpoint(opts: {
   const deviceLabel = opts.device ?? hostname() ?? "device";
   const agentLabel = opts.agent ?? "agent";
   const filename = `${compactTimestamp(createdAt)}-${safeName(deviceLabel)}-${safeName(agentLabel)}-${safeName(branchName)}.md`;
-  const path = join(checkpoints, filename);
+  const path = uniquePath(checkpoints, filename);
   const contents = [
     "# Checkpoint",
     "",
@@ -488,6 +498,7 @@ function readConfig(home?: string): Config | null {
 function loadSetup(home?: string): SetupResult {
   const config = readConfig(home);
   if (!config) throw new HandoffError("agent-handoff is not enabled; run agent-handoff enable");
+  if (!existsSync(config.vault)) throw new HandoffError(`vault directory is missing: ${config.vault}`);
   return { home: resolveHome(home), vault: resolve(config.vault), created: 0, updated: 0 };
 }
 
@@ -597,6 +608,38 @@ function appendFile(path: string, contents: string): void {
   writeFileSync(path, contents, { encoding: "utf8", flag: "a" });
 }
 
+function uniquePath(directory: string, filename: string): string {
+  const dot = filename.lastIndexOf(".");
+  const stem = dot === -1 ? filename : filename.slice(0, dot);
+  const extension = dot === -1 ? "" : filename.slice(dot);
+  let path = join(directory, filename);
+  let index = 2;
+  while (existsSync(path)) {
+    path = join(directory, `${stem}-${index}${extension}`);
+    index += 1;
+  }
+  return path;
+}
+
+function validateSyncRemote(home: string, syncUrl: string): void {
+  const result = gitRun(home, ["ls-remote", syncUrl]);
+  if (result.status !== 0) {
+    throw new HandoffError(result.output.trim() || `cannot access sync remote: ${syncUrl}`);
+  }
+}
+
+function hasUnsyncedLocalVault(vault: string): boolean {
+  return existsSync(vault) && !existsSync(join(vault, ".git")) && !isSeedOnlyVault(vault);
+}
+
+function remoteHasRefs(home: string, syncUrl: string): boolean {
+  const result = gitRun(home, ["ls-remote", "--heads", syncUrl]);
+  if (result.status !== 0) {
+    throw new HandoffError(result.output.trim() || `cannot inspect sync remote: ${syncUrl}`);
+  }
+  return result.output.trim().length > 0;
+}
+
 function cloneVaultIfNeeded(home: string, vault: string, syncUrl: string): boolean {
   if (existsSync(join(vault, ".git"))) return false;
   if (existsSync(vault)) {
@@ -607,6 +650,9 @@ function cloneVaultIfNeeded(home: string, vault: string, syncUrl: string): boole
     }
   }
   const clone = gitRun(home, ["clone", syncUrl, vault]);
+  if (clone.status !== 0) {
+    throw new HandoffError(clone.output.trim() || `git clone ${syncUrl} failed`);
+  }
   return clone.status === 0;
 }
 
@@ -630,14 +676,14 @@ function isSeedOnlyVault(vault: string): boolean {
 
 function ensureGitRemote(vault: string, syncUrl: string): void {
   if (!existsSync(join(vault, ".git"))) {
-    gitRun(vault, ["init"]);
-    gitRun(vault, ["branch", "-M", "main"]);
+    gitChecked(vault, ["init"]);
+    gitChecked(vault, ["branch", "-M", "main"]);
   }
   const remotes = gitOutput(vault, ["remote"]);
   if (remotes?.split(/\r?\n/).includes("origin")) {
-    gitRun(vault, ["remote", "set-url", "origin", syncUrl]);
+    gitChecked(vault, ["remote", "set-url", "origin", syncUrl]);
   } else {
-    gitRun(vault, ["remote", "add", "origin", syncUrl]);
+    gitChecked(vault, ["remote", "add", "origin", syncUrl]);
   }
 }
 
@@ -660,11 +706,14 @@ function gitRun(root: string, args: string[]): { status: number; output: string 
   const result = spawnSync("git", args, {
     cwd: root,
     encoding: "utf8",
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
     stdio: ["ignore", "pipe", "pipe"],
+    timeout: GIT_TIMEOUT_MS,
   });
+  const error = result.error ? `\n${result.error.message}` : "";
   return {
     status: result.status ?? 1,
-    output: `${result.stdout ?? ""}${result.stderr ?? ""}`,
+    output: `${result.stdout ?? ""}${result.stderr ?? ""}${error}`,
   };
 }
 

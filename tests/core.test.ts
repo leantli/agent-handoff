@@ -337,4 +337,79 @@ describe("start, checkpoint, and learn", () => {
     expect(config.sync_url).toBe(bare);
     expect(existsSync(join(home, "vault", ".git"))).toBe(true);
   });
+
+  test("enableSync rejects an unreachable sync remote without marking sync configured", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const missing = join(tmp, "missing.git");
+
+    expect(() => enableSync({ home, syncUrl: missing })).toThrow(HandoffError);
+    expect(existsSync(join(home, "config.json"))).toBe(false);
+  });
+
+  test("enableSync rejects joining an existing remote when local vault has unsynced memory", () => {
+    const tmp = tempDir();
+    const bare = join(tmp, "vault.git");
+    const homeA = join(tmp, "home-a");
+    const homeB = join(tmp, "home-b");
+    const rootB = join(tmp, "repo-b");
+    execFileSync("git", ["init", "--bare", bare]);
+    mkdirSync(rootB);
+
+    enableHandoff({ home: homeA, skillsHome: join(tmp, "skills-a") });
+    learn("A device already owns the remote vault.", { home: homeA, kind: "lesson" });
+    enableSync({ home: homeA, syncUrl: bare });
+    syncVault({ home: homeA });
+
+    enableHandoff({ home: homeB, skillsHome: join(tmp, "skills-b") });
+    writeFileSync(join(rootB, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo\n");
+    buildStartPacket({ root: rootB, home: homeB, branch: "main" });
+
+    expect(() => enableSync({ home: homeB, syncUrl: bare })).toThrow(HandoffError);
+    expect(readFileSync(join(homeB, "config.json"), "utf8")).not.toContain("sync_url");
+  });
+
+  test("buildStartPacket fails when the configured vault is missing", () => {
+    const tmp = tempDir();
+    const root = join(tmp, "repo");
+    const home = join(tmp, "home");
+    mkdirSync(root);
+    enableHandoff({ home, skillsHome: join(tmp, "skills") });
+    rmSync(join(home, "vault"), { recursive: true, force: true });
+
+    expect(() => buildStartPacket({ root, home })).toThrow(HandoffError);
+  });
+
+  test("writeCheckpoint keeps multiple checkpoints from the same second", () => {
+    const tmp = tempDir();
+    const root = join(tmp, "repo");
+    const home = join(tmp, "home");
+    mkdirSync(root);
+    enableHandoff({ home, skillsHome: join(tmp, "skills") });
+    writeFileSync(join(root, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo\n");
+    const now = new Date("2026-05-08T12:00:00Z");
+
+    const first = writeCheckpoint({
+      root,
+      home,
+      note: "First checkpoint.",
+      now,
+      device: "laptop",
+      agent: "codex",
+      branch: "main",
+    });
+    const second = writeCheckpoint({
+      root,
+      home,
+      note: "Second checkpoint.",
+      now,
+      device: "laptop",
+      agent: "codex",
+      branch: "main",
+    });
+
+    expect(second.path).not.toBe(first.path);
+    expect(readFileSync(first.path, "utf8")).toContain("First checkpoint.");
+    expect(readFileSync(second.path, "utf8")).toContain("Second checkpoint.");
+  });
 });

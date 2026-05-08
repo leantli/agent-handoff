@@ -171,6 +171,20 @@ describe("cli", () => {
     expect(result.stderr).toContain("agent-handoff is not enabled");
   });
 
+  test("start reports a missing configured vault instead of recreating it", () => {
+    const tmp = tempDir();
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    mkdirSync(repo);
+    runCli(repo, "--home", home, "enable", "--skills-home", join(tmp, "skills"));
+    rmSync(join(home, "vault"), { recursive: true, force: true });
+
+    const result = runCli(repo, "--home", home, "start");
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("vault directory is missing");
+  });
+
   test("sync init configures cross-device sync", () => {
     const tmp = tempDir();
     const repo = join(tmp, "repo");
@@ -184,6 +198,21 @@ describe("cli", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("Cross-device sync enabled");
     expect(readFileSync(join(home, "config.json"), "utf8")).toContain(bare);
+  });
+
+  test("sync init fails for an unreachable sync remote", () => {
+    const tmp = tempDir();
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    const missing = join(tmp, "missing.git");
+    mkdirSync(repo);
+
+    const result = runCli(repo, "--home", home, "sync", "init", missing);
+
+    expect(result.code).toBe(1);
+    expect(result.stdout).not.toContain("Cross-device sync enabled");
+    expect(result.stderr).not.toBe("");
+    expect(existsSync(join(home, "config.json"))).toBe(false);
   });
 
   test("checkpoint without note on tty fails fast", () => {
