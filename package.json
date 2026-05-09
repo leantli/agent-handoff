@@ -1,6 +1,6 @@
 {
   "name": "@leantli/agent-handoff",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Shared vault handoff memory for coding agents.",
   "type": "module",
   "license": "MIT",

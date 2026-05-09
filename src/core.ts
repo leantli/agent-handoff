@@ -384,10 +384,11 @@ export function syncVault(opts: { home?: string } = {}): string[] {
 
   const branch = gitOutput(setup.vault, ["branch", "--show-current"]) ?? "main";
   const pull = gitRun(setup.vault, ["pull", "--rebase", "--autostash", "origin", branch]);
-  if (pull.status !== 0 && !isEmptyRemotePull(pull.output)) {
+  const ignoredEmptyRemotePull = pull.status !== 0 && isEmptyRemotePull(pull.output);
+  if (pull.status !== 0 && !ignoredEmptyRemotePull) {
     throw new HandoffError(pull.output.trim() || "git pull failed");
   }
-  if (pull.output.trim()) outputs.push(pull.output.trim());
+  if (!ignoredEmptyRemotePull && pull.output.trim()) outputs.push(pull.output.trim());
 
   const push = gitRun(setup.vault, ["push", "-u", "origin", branch]);
   if (push.status !== 0) {

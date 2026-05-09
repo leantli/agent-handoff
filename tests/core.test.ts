@@ -74,6 +74,21 @@ describe("vault setup", () => {
     expect(lessons).toContain("A device learned this.");
   });
 
+  test("syncVault hides expected empty-remote pull noise on first sync", () => {
+    const tmp = tempDir();
+    const bare = join(tmp, "vault.git");
+    const home = join(tmp, "home");
+    execFileSync("git", ["init", "--bare", bare]);
+
+    setupHome({ home, syncUrl: bare });
+    learn("First sync should be quiet about missing remote refs.", { home, kind: "lesson" });
+
+    const output = syncVault({ home }).join("\n");
+
+    expect(output).not.toContain("couldn't find remote ref");
+    expect(output).not.toContain("could not find remote ref");
+  });
+
   test("enableSync replaces a fresh local seed vault with remote memory", () => {
     const tmp = tempDir();
     const bare = join(tmp, "vault.git");
