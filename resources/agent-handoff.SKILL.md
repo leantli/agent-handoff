@@ -22,6 +22,31 @@ When beginning work in a repository:
 Do not edit `AGENTS.md`, `CLAUDE.md`, or other instruction files to install
 agent-handoff.
 
+## Cross-Device Sync Setup
+
+Use a private vault repository for sync. The vault can contain project context,
+preferences, decisions, and handoff notes.
+
+If the user asks you to create the GitHub sync repository, run:
+
+```bash
+agent-handoff sync create <owner>/<repo>
+agent-handoff sync
+```
+
+`sync create` uses GitHub CLI (`gh`) and creates the repository as private. If an
+existing repository is public, do not use it for sync.
+
+If the user already has a private git repository for the vault, run:
+
+```bash
+agent-handoff sync init <private-git-url>
+agent-handoff sync
+```
+
+On another device, install and enable the CLI, then run `sync init` with the same
+private git URL, `agent-handoff sync`, and `agent-handoff start`.
+
 ## During Work
 
 Use `learn` only for stable facts that should survive future sessions, clones,

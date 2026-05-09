@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -39,6 +39,50 @@ function runCli(repo: string, ...args: string[]): { code: number; stdout: string
   const stderr = new BufferWriter();
   const code = main(args, { cwd: repo, stdout, stderr });
   return { code, stdout: stdout.text(), stderr: stderr.text() };
+}
+
+function withFakeGh(tmp: string): { path: string; log: string; remote: string } {
+  const bin = join(tmp, "bin");
+  const log = join(tmp, "gh.log");
+  const remote = join(tmp, "vault.git");
+  const state = join(tmp, "repo-created");
+  mkdirSync(bin, { recursive: true });
+  const gh = join(bin, "gh");
+  writeFileSync(
+    gh,
+    [
+      "#!/bin/sh",
+      `echo "$@" >> "${log}"`,
+      'if [ "$1" = "repo" ] && [ "$2" = "view" ]; then',
+      `  if [ -f "${state}" ]; then`,
+      `    printf '{"isPrivate":true,"nameWithOwner":"leantli/agent-handoff-vault","url":"file://${remote}","sshUrl":"file://${remote}"}'`,
+      "    exit 0",
+      "  fi",
+      "  echo 'repository not found' >&2",
+      "  exit 1",
+      "fi",
+      'if [ "$1" = "repo" ] && [ "$2" = "create" ]; then',
+      `  touch "${state}"`,
+      `  git init --bare "${remote}" >/dev/null 2>&1`,
+      "  exit 0",
+      "fi",
+      "exit 2",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  chmodSync(gh, 0o755);
+  return { path: `${bin}:${process.env.PATH ?? ""}`, log, remote };
+}
+
+function withPath<T>(path: string, fn: () => T): T {
+  const oldPath = process.env.PATH;
+  process.env.PATH = path;
+  try {
+    return fn();
+  } finally {
+    process.env.PATH = oldPath;
+  }
 }
 
 describe("cli", () => {
@@ -210,6 +254,27 @@ describe("cli", () => {
     const status = runCli(repo, "--home", home, "status");
     expect(status.code).toBe(0);
     expect(status.stdout).toContain(`Sync: configured (${bare})`);
+  });
+
+  test("sync create creates a private GitHub repository and configures sync", () => {
+    const tmp = tempDir();
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    mkdirSync(repo);
+    const fakeGh = withFakeGh(tmp);
+
+    const result = withPath(fakeGh.path, () =>
+      runCli(repo, "--home", home, "sync", "create", "leantli/agent-handoff-vault"),
+    );
+
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain("Created private GitHub repository: leantli/agent-handoff-vault");
+    expect(result.stdout).toContain(`Cross-device sync enabled: file://${fakeGh.remote}`);
+    expect(readFileSync(fakeGh.log, "utf8")).toContain(
+      "repo create leantli/agent-handoff-vault --private",
+    );
+    expect(readFileSync(join(home, "config.json"), "utf8")).toContain(`file://${fakeGh.remote}`);
   });
 
   test("sync init fails for an unreachable sync remote", () => {

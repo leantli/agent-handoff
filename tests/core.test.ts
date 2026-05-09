@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -14,6 +15,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import {
   HandoffError,
   buildStartPacket,
+  createGitHubSyncRepo,
   enableHandoff,
   enableSync,
   getStatus,
@@ -31,6 +33,59 @@ function tempDir(): string {
   const path = mkdtempSync(join(tmpdir(), "agent-handoff-test-"));
   temps.push(path);
   return path;
+}
+
+function withFakeGh(
+  tmp: string,
+  opts: { exists?: boolean; private?: boolean } = {},
+): { path: string; log: string; remote: string } {
+  const bin = join(tmp, "bin");
+  const log = join(tmp, "gh.log");
+  const remote = join(tmp, "vault.git");
+  const state = join(tmp, "repo-created");
+  mkdirSync(bin, { recursive: true });
+  if (opts.exists) {
+    writeFileSync(state, "1\n");
+    execFileSync("git", ["init", "--bare", remote]);
+  }
+  const isPrivate = opts.private ?? true;
+  const gh = join(bin, "gh");
+  writeFileSync(
+    gh,
+    [
+      "#!/bin/sh",
+      `echo "$@" >> "${log}"`,
+      'if [ "$1" = "repo" ] && [ "$2" = "view" ]; then',
+      `  if [ -f "${state}" ]; then`,
+      `    printf '{"isPrivate":${isPrivate ? "true" : "false"},"nameWithOwner":"leantli/agent-handoff-vault","url":"file://${remote}","sshUrl":"file://${remote}"}'`,
+      "    exit 0",
+      "  fi",
+      "  echo 'repository not found' >&2",
+      "  exit 1",
+      "fi",
+      'if [ "$1" = "repo" ] && [ "$2" = "create" ]; then',
+      `  touch "${state}"`,
+      `  git init --bare "${remote}" >/dev/null 2>&1`,
+      "  exit 0",
+      "fi",
+      "echo unexpected gh command >&2",
+      "exit 2",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  chmodSync(gh, 0o755);
+  return { path: `${bin}:${process.env.PATH ?? ""}`, log, remote };
+}
+
+function withPath<T>(path: string, fn: () => T): T {
+  const oldPath = process.env.PATH;
+  process.env.PATH = path;
+  try {
+    return fn();
+  } finally {
+    process.env.PATH = oldPath;
+  }
 }
 
 afterEach(() => {
@@ -369,6 +424,41 @@ describe("start, checkpoint, and learn", () => {
     expect(result.vault).toBe(resolve(home, "vault"));
     expect(config.sync_url).toBe(bare);
     expect(existsSync(join(home, "vault", ".git"))).toBe(true);
+  });
+
+  test("createGitHubSyncRepo creates a private repository and configures sync", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const fakeGh = withFakeGh(tmp);
+
+    const result = withPath(fakeGh.path, () =>
+      createGitHubSyncRepo({ home, repository: "leantli/agent-handoff-vault" }),
+    );
+
+    expect(result.created).toBe(true);
+    expect(result.isPrivate).toBe(true);
+    expect(result.syncUrl).toBe(`file://${fakeGh.remote}`);
+    expect(readFileSync(fakeGh.log, "utf8")).toContain(
+      "repo create leantli/agent-handoff-vault --private",
+    );
+    expect(readFileSync(join(home, "config.json"), "utf8")).toContain(`file://${fakeGh.remote}`);
+
+    learn("Created vault can sync.", { home, kind: "lesson" });
+    expect(() => syncVault({ home })).not.toThrow();
+  });
+
+  test("createGitHubSyncRepo refuses an existing public repository", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const fakeGh = withFakeGh(tmp, { exists: true, private: false });
+
+    expect(() =>
+      withPath(fakeGh.path, () =>
+        createGitHubSyncRepo({ home, repository: "leantli/agent-handoff-vault" }),
+      ),
+    ).toThrow("is public");
+    expect(existsSync(join(home, "config.json"))).toBe(false);
+    expect(readFileSync(fakeGh.log, "utf8")).not.toContain("repo create");
   });
 
   test("enableSync rejects an unreachable sync remote without marking sync configured", () => {

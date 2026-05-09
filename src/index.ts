@@ -1,6 +1,7 @@
 export {
   HandoffError,
   buildStartPacket,
+  createGitHubSyncRepo,
   enableHandoff,
   enableSync,
   getStatus,
@@ -12,6 +13,7 @@ export {
 
 export type {
   CheckpointResult,
+  CreateGitHubSyncRepoResult,
   EnableResult,
   LearnResult,
   Status,
