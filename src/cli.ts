@@ -48,7 +48,7 @@ function buildProgram(
   const program = new Command();
   program
     .name("agent-handoff")
-    .description("Shared vault handoff memory for Codex and Claude Code.")
+    .description("Shared vault handoff memory for coding agents.")
     .version("agent-handoff 0.5.0")
     .exitOverride()
     .configureOutput({
@@ -87,7 +87,7 @@ function buildProgram(
     .option("--note <text>", "Note text. If omitted, stdin is used.")
     .option("--file <path>", "Read note text from a file.")
     .option("--device <name>", "Device name for the checkpoint.")
-    .option("--agent <name>", "Agent/client name, such as codex or claude.")
+    .option("--agent <name>", "Agent/client label for checkpoint metadata.")
     .option("--branch <branch>", "Override detected branch.")
     .action((options: NoteOptions & { device?: string; agent?: string; branch?: string }) => {
       const result = writeCheckpoint({

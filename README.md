@@ -17,7 +17,15 @@ npm install -g @leantli/agent-handoff
 agent-handoff enable
 ```
 
-`enable` creates local memory and installs the user skill that tells compatible
+GitHub direct install is also supported:
+
+```bash
+npm install -g github:leantli/agent-handoff
+agent-handoff enable
+```
+
+`enable` creates local memory and installs the packaged skill under
+`~/.agents/skills` for agents that read user-level skills. The skill tells those
 agents when to run `start`, `checkpoint`, and `learn`.
 
 `agent-handoff status` also tells agents whether cross-device sync is configured.
@@ -27,8 +35,12 @@ agents when to run `start`, `checkpoint`, and `learn`.
 At the start of a coding session:
 
 ```bash
+agent-handoff status
 agent-handoff start
 ```
+
+If `status` says sync is configured and you are switching devices or clones, run
+`agent-handoff sync` before `start`.
 
 Before switching sessions, tasks, clones, or devices:
 

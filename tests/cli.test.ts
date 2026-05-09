@@ -42,6 +42,13 @@ function runCli(repo: string, ...args: string[]): { code: number; stdout: string
 }
 
 describe("cli", () => {
+  test("package supports GitHub direct install by building on prepare", () => {
+    const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8"));
+
+    expect(pkg.scripts.prepare).toBe("npm run build");
+    expect(pkg.scripts.prepack).toBeUndefined();
+  });
+
   test("enable, checkpoint, and start flow without touching instruction files", () => {
     const tmp = tempDir();
     const repo = join(tmp, "repo");
@@ -218,6 +225,85 @@ describe("cli", () => {
     expect(result.stdout).not.toContain("Cross-device sync enabled");
     expect(result.stderr).not.toBe("");
     expect(existsSync(join(home, "config.json"))).toBe(false);
+  });
+
+  test("status reports sync misconfigured when sync_url exists but vault is not a git repo", () => {
+    const tmp = tempDir();
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    const vault = join(home, "vault");
+    mkdirSync(repo);
+    mkdirSync(vault, { recursive: true });
+    writeFileSync(join(home, "config.json"), JSON.stringify({ version: 2, vault, sync_url: join(tmp, "vault.git") }));
+
+    const result = runCli(repo, "--home", home, "status");
+
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain(`sync is configured for ${join(tmp, "vault.git")}`);
+    expect(result.stdout).toContain(`run agent-handoff sync init ${join(tmp, "vault.git")}`);
+  });
+
+  test("sync rejects a git vault when sync_url is not configured", () => {
+    const tmp = tempDir();
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    const vault = join(home, "vault");
+    const remote = join(tmp, "vault.git");
+    mkdirSync(repo);
+    mkdirSync(vault, { recursive: true });
+    execFileSync("git", ["init", "--bare", remote]);
+    execFileSync("git", ["init"], { cwd: vault });
+    execFileSync("git", ["remote", "add", "origin", remote], { cwd: vault });
+    writeFileSync(join(vault, "note.md"), "unsynced memory\n");
+    writeFileSync(join(home, "config.json"), JSON.stringify({ version: 2, vault }));
+
+    const result = runCli(repo, "--home", home, "sync");
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("sync is not configured");
+    expect(execFileSync("git", ["ls-remote", "--heads", remote], { encoding: "utf8" })).toBe("");
+  });
+
+  test("enable reports invalid config without a stack trace", () => {
+    const tmp = tempDir();
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    mkdirSync(repo);
+    mkdirSync(home);
+    writeFileSync(join(home, "config.json"), "{not-json");
+
+    const result = runCli(repo, "--home", home, "enable", "--skills-home", join(tmp, "skills"));
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("config.json is invalid");
+    expect(result.stderr).not.toContain("SyntaxError");
+  });
+
+  test("status reports malformed config without undefined paths", () => {
+    const tmp = tempDir();
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    mkdirSync(repo);
+    mkdirSync(home);
+    writeFileSync(join(home, "config.json"), "{}");
+
+    const result = runCli(repo, "--home", home, "status");
+
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain("config.json is invalid: vault must be a non-empty string");
+    expect(result.stdout).not.toContain("undefined");
+  });
+
+  test("checkpoint help uses a generic agent label description", () => {
+    const tmp = tempDir();
+    const repo = join(tmp, "repo");
+    mkdirSync(repo);
+
+    const result = runCli(repo, "checkpoint", "--help");
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("Agent/client label for checkpoint metadata.");
+    expect(result.stdout).not.toContain("such as codex or claude");
   });
 
   test("checkpoint without note on tty fails fast", () => {

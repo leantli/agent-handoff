@@ -1,6 +1,6 @@
 ---
 name: agent-handoff
-description: Use when starting, resuming, pausing, checkpointing, or transferring Codex/Claude Code work across sessions, clones, worktrees, or devices with the agent-handoff CLI.
+description: Use when starting, resuming, pausing, checkpointing, or transferring coding-agent work across sessions, clones, worktrees, or devices with the agent-handoff CLI.
 ---
 
 # Agent Handoff

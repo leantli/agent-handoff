@@ -377,6 +377,124 @@ describe("start, checkpoint, and learn", () => {
     expect(status.problems.join("\n")).toContain("config.json is invalid");
   });
 
+  test("status reports a malformed config object without using undefined paths", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    mkdirSync(home);
+    writeFileSync(join(home, "config.json"), "{}");
+
+    const status = getStatus({ home });
+
+    expect(status.initialized).toBe(false);
+    expect(status.problems.join("\n")).toContain("config.json is invalid: vault must be a non-empty string");
+    expect(status.problems.join("\n")).not.toContain("undefined");
+  });
+
+  test("start fails clearly when config vault has the wrong type", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const root = join(tmp, "repo");
+    mkdirSync(home);
+    mkdirSync(root);
+    writeFileSync(join(home, "config.json"), JSON.stringify({ version: 2, vault: 123 }));
+
+    expect(() => buildStartPacket({ root, home })).toThrow("config.json is invalid: vault must be a non-empty string");
+  });
+
+  test("setupHome fails with HandoffError when existing config is invalid", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    mkdirSync(home);
+    writeFileSync(join(home, "config.json"), "{not-json");
+
+    expect(() => setupHome({ home })).toThrow(HandoffError);
+  });
+
+  test("status reports sync misconfigured when sync_url exists but vault is not a git repo", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const vault = join(home, "vault");
+    mkdirSync(vault, { recursive: true });
+    writeFileSync(join(home, "config.json"), JSON.stringify({ version: 2, vault, sync_url: join(tmp, "vault.git") }));
+
+    const status = getStatus({ home });
+
+    expect(status.initialized).toBe(false);
+    expect(status.syncConfigured).toBe(false);
+    expect(status.problems.join("\n")).toContain(`sync is configured for ${join(tmp, "vault.git")}`);
+    expect(status.problems.join("\n")).toContain(`run agent-handoff sync init ${join(tmp, "vault.git")}`);
+  });
+
+  test("status reports sync misconfigured when vault origin is missing", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const vault = join(home, "vault");
+    mkdirSync(vault, { recursive: true });
+    execFileSync("git", ["init"], { cwd: vault });
+    writeFileSync(join(home, "config.json"), JSON.stringify({ version: 2, vault, sync_url: join(tmp, "vault.git") }));
+
+    const status = getStatus({ home });
+
+    expect(status.initialized).toBe(false);
+    expect(status.syncConfigured).toBe(false);
+    expect(status.problems.join("\n")).toContain(`sync is configured for ${join(tmp, "vault.git")}`);
+    expect(status.problems.join("\n")).toContain(`run agent-handoff sync init ${join(tmp, "vault.git")}`);
+  });
+
+  test("status reports sync misconfigured when vault origin differs from config", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const vault = join(home, "vault");
+    const expected = join(tmp, "expected.git");
+    const actual = join(tmp, "actual.git");
+    mkdirSync(vault, { recursive: true });
+    execFileSync("git", ["init"], { cwd: vault });
+    execFileSync("git", ["remote", "add", "origin", actual], { cwd: vault });
+    writeFileSync(join(home, "config.json"), JSON.stringify({ version: 2, vault, sync_url: expected }));
+
+    const status = getStatus({ home });
+
+    expect(status.initialized).toBe(false);
+    expect(status.syncConfigured).toBe(false);
+    expect(status.problems.join("\n")).toContain("sync is configured for");
+    expect(status.problems.join("\n")).toContain("but vault origin is");
+    expect(status.problems.join("\n")).toContain(`run agent-handoff sync init ${expected}`);
+  });
+
+  test("syncVault rejects a vault origin that differs from config before syncing", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const vault = join(home, "vault");
+    const expected = join(tmp, "expected.git");
+    const actual = join(tmp, "actual.git");
+    mkdirSync(vault, { recursive: true });
+    execFileSync("git", ["init", "--bare", expected]);
+    execFileSync("git", ["init", "--bare", actual]);
+    execFileSync("git", ["init"], { cwd: vault });
+    execFileSync("git", ["remote", "add", "origin", actual], { cwd: vault });
+    writeFileSync(join(vault, "note.md"), "unsynced memory\n");
+    writeFileSync(join(home, "config.json"), JSON.stringify({ version: 2, vault, sync_url: expected }));
+
+    expect(() => syncVault({ home })).toThrow("sync is configured for");
+    expect(execFileSync("git", ["ls-remote", "--heads", actual], { encoding: "utf8" })).toBe("");
+  });
+
+  test("syncVault rejects a git vault when sync_url is not configured", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const vault = join(home, "vault");
+    const remote = join(tmp, "vault.git");
+    mkdirSync(vault, { recursive: true });
+    execFileSync("git", ["init", "--bare", remote]);
+    execFileSync("git", ["init"], { cwd: vault });
+    execFileSync("git", ["remote", "add", "origin", remote], { cwd: vault });
+    writeFileSync(join(vault, "note.md"), "unsynced memory\n");
+    writeFileSync(join(home, "config.json"), JSON.stringify({ version: 2, vault }));
+
+    expect(() => syncVault({ home })).toThrow("sync is not configured");
+    expect(execFileSync("git", ["ls-remote", "--heads", remote], { encoding: "utf8" })).toBe("");
+  });
+
   test("start fails with a clear error when config is invalid", () => {
     const tmp = tempDir();
     const home = join(tmp, "home");

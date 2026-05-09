@@ -126,7 +126,8 @@ export function setupHome(opts: {
   if (opts.syncUrl) desired.sync_url = opts.syncUrl;
 
   if (existsSync(configPath)) {
-    const existing = JSON.parse(readFileSync(configPath, "utf8")) as Config;
+    const existing = readConfig(opts.home);
+    if (!existing) throw new HandoffError(`${CONFIG_FILE} is missing`);
     let changed = false;
     if (existing.version !== 2) {
       existing.version = 2;
@@ -262,7 +263,7 @@ export function buildStartPacket(opts: {
     `Project: \`${pid}\``,
     `Branch: \`${branchName}\``,
     "",
-    "Read this packet before making changes. Use it to recover context from previous Codex and Claude Code sessions.",
+    "Read this packet before making changes. Use it to recover context from previous coding-agent sessions.",
   ];
 
   for (const [title, path] of sections) {
@@ -357,9 +358,12 @@ export function learn(
 
 export function syncVault(opts: { home?: string } = {}): string[] {
   const setup = loadSetup(opts.home);
-  if (!existsSync(join(setup.vault, ".git"))) {
-    throw new HandoffError("vault is not a git repository; run agent-handoff sync init <git-url> first");
+  const config = readConfig(opts.home);
+  if (!config?.sync_url) {
+    throw new HandoffError("sync is not configured; run agent-handoff sync init <git-url> first");
   }
+  const syncProblem = syncConfigProblem(setup.vault, config.sync_url);
+  if (syncProblem) throw new HandoffError(syncProblem);
   const outputs: string[] = [];
 
   gitChecked(setup.vault, ["add", "-A"]);
@@ -416,7 +420,16 @@ export function getStatus(opts: { root?: string; home?: string } = {}): Status {
   } else if (!existsSync(config.vault)) {
     problems.push(`vault directory is missing: ${config.vault}`);
   } else {
-    syncUrl = config.sync_url;
+    if (config.sync_url) {
+      const syncProblem = syncConfigProblem(config.vault, config.sync_url);
+      if (syncProblem) {
+        problems.push(syncProblem);
+      } else {
+        syncUrl = config.sync_url;
+      }
+    } else {
+      syncUrl = undefined;
+    }
   }
 
   return {
@@ -516,12 +529,55 @@ function expandHome(path: string): string {
 function readConfig(home?: string): Config | null {
   const configPath = join(resolveHome(home), CONFIG_FILE);
   if (!existsSync(configPath)) return null;
+  let raw: unknown;
   try {
-    return JSON.parse(readFileSync(configPath, "utf8")) as Config;
+    raw = JSON.parse(readFileSync(configPath, "utf8"));
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new HandoffError(`${CONFIG_FILE} is invalid: ${detail}`);
   }
+  return validateConfig(raw);
+}
+
+function validateConfig(raw: unknown): Config {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new HandoffError(`${CONFIG_FILE} is invalid: expected an object`);
+  }
+
+  const data = raw as Record<string, unknown>;
+  if (typeof data.vault !== "string" || data.vault.trim().length === 0) {
+    throw new HandoffError(`${CONFIG_FILE} is invalid: vault must be a non-empty string`);
+  }
+  if (data.version !== undefined && typeof data.version !== "number") {
+    throw new HandoffError(`${CONFIG_FILE} is invalid: version must be a number`);
+  }
+  if (data.sync_url !== undefined && (typeof data.sync_url !== "string" || data.sync_url.trim().length === 0)) {
+    throw new HandoffError(`${CONFIG_FILE} is invalid: sync_url must be a non-empty string`);
+  }
+
+  const config: Config = {
+    version: typeof data.version === "number" ? data.version : 0,
+    vault: data.vault,
+  };
+  if (typeof data.sync_url === "string") {
+    config.sync_url = data.sync_url;
+  }
+  return config;
+}
+
+function syncConfigProblem(vault: string, syncUrl: string): string | null {
+  if (!existsSync(join(vault, ".git"))) {
+    return `sync is configured for ${syncUrl} but vault is not a git repository; run agent-handoff sync init ${syncUrl}`;
+  }
+
+  const origin = gitOutput(vault, ["remote", "get-url", "origin"]);
+  if (!origin) {
+    return `sync is configured for ${syncUrl} but vault git remote origin is missing; run agent-handoff sync init ${syncUrl}`;
+  }
+  if (origin !== syncUrl) {
+    return `sync is configured for ${syncUrl} but vault origin is ${origin}; run agent-handoff sync init ${syncUrl}`;
+  }
+  return null;
 }
 
 function loadSetup(home?: string): SetupResult {
