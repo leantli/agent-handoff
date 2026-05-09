@@ -49,7 +49,7 @@ function buildProgram(
   program
     .name("agent-handoff")
     .description("Shared vault handoff memory for coding agents.")
-    .version("agent-handoff 0.5.0")
+    .version("agent-handoff 0.5.1")
     .exitOverride()
     .configureOutput({
       writeOut: (str) => stdout.write(str),

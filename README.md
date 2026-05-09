@@ -1,7 +1,7 @@
 # agent-handoff
 
-`agent-handoff` gives coding agents a small shared memory layer for new sessions,
-fresh clones, git worktrees, and devices.
+`agent-handoff` gives coding agents a small shared memory layer for new
+sessions, fresh clones, git worktrees, and devices.
 
 Long agent sessions accumulate useful context: project background, current task
 state, decisions, preferences, and repeated corrections. Without a handoff
@@ -10,7 +10,7 @@ layer, the next session starts cold.
 `agent-handoff` stores that context under `~/.agent-handoff` by default. It does
 not modify `AGENTS.md`, `CLAUDE.md`, or other project instruction files.
 
-## Install
+## Quick Start
 
 ```bash
 npm install -g @leantli/agent-handoff
@@ -24,15 +24,23 @@ npm install -g github:leantli/agent-handoff
 agent-handoff enable
 ```
 
-`enable` creates local memory and installs the packaged skill under
-`~/.agents/skills` for agents that read user-level skills. The skill tells those
-agents when to run `start`, `checkpoint`, and `learn`.
+`enable` does two things:
 
-`agent-handoff status` also tells agents whether cross-device sync is configured.
+- creates local memory under `~/.agent-handoff`
+- installs the packaged skill under `~/.agents/skills/agent-handoff`
+
+Agents that load user-level skills can then discover when to run
+`agent-handoff start`, `checkpoint`, `learn`, and `sync`. Existing agent
+sessions may need to be restarted before they see the new skill.
+
+The tool never edits `AGENTS.md`, `CLAUDE.md`, or project instruction files.
 
 ## Daily Workflow
 
-At the start of a coding session:
+Run project-aware commands from inside the real project repository, not from a
+parent workspace that contains many repositories.
+
+At the start of a coding session in a repo:
 
 ```bash
 agent-handoff status
@@ -57,14 +65,17 @@ agent-handoff learn --kind preference --note "Prefer small focused diffs."
 For project-specific decisions or branch-specific context:
 
 ```bash
-agent-handoff learn --scope project --kind decision --note "Use vault-first storage."
+agent-handoff learn --scope project --kind decision --note "Use TypeScript for the CLI."
 agent-handoff learn --scope branch --kind context --note "This branch is testing v0.5."
 ```
 
 ## Cross-Device Sync
 
-Local cross-session memory works without any git repository. To share memory
-across devices, create a private git repository for the vault, then run:
+Local cross-session memory works immediately after `agent-handoff enable`. No
+git repository is needed for the vault.
+
+Cross-device sync is optional. To share memory across devices, create a private
+git repository for the vault, then run:
 
 ```bash
 agent-handoff sync init git@github.com:you/agent-handoff-vault.git
@@ -90,6 +101,19 @@ github.com__p1cn__loop
 
 If `.agent-handoff.yml` exists, its `project_id` is used as an override. The
 tool does not require this file for normal git repositories.
+
+In a workspace like this:
+
+```text
+~/workspace/
+  app-one/
+  app-two/
+  app-three/
+```
+
+run `agent-handoff start`, `checkpoint`, and project or branch `learn` commands
+from `~/workspace/app-one`, `~/workspace/app-two`, or whichever repository is
+actually being edited. Global preferences can be written from anywhere.
 
 ## What Gets Stored
 
