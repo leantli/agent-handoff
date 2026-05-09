@@ -66,7 +66,7 @@ For project-specific decisions or branch-specific context:
 
 ```bash
 agent-handoff learn --scope project --kind decision --note "Use TypeScript for the CLI."
-agent-handoff learn --scope branch --kind context --note "This branch is testing v0.5."
+agent-handoff learn --scope branch --kind context --note "This branch is testing the sync workflow."
 ```
 
 ## Cross-Device Sync
@@ -74,26 +74,16 @@ agent-handoff learn --scope branch --kind context --note "This branch is testing
 Local cross-session memory works immediately after `agent-handoff enable`. No
 git repository is needed for the vault.
 
-Cross-device sync is optional. The vault repository should be private because it
-can contain project background, preferences, decisions, and handoff notes.
-
-If GitHub CLI (`gh`) is installed and authenticated, let `agent-handoff` create
-the private repository:
-
-```bash
-agent-handoff sync create you/agent-handoff-vault
-agent-handoff sync
-```
-
-`sync create` always uses `gh repo create --private`. If the repository already
-exists and is public, `agent-handoff` refuses to use it.
-
-If you create the repository manually, make it private, then run:
+Cross-device sync is optional. Create a dedicated private repository for the
+vault. Do not use a project code repository as the vault. Then run:
 
 ```bash
 agent-handoff sync init git@github.com:you/agent-handoff-vault.git
 agent-handoff sync
 ```
+
+Use a private repository because the vault can contain project background,
+preferences, decisions, and handoff notes.
 
 Run `agent-handoff sync init <same-git-url>` once on each device that should
 share the vault. After that, run `agent-handoff sync` before starting on another
@@ -102,6 +92,10 @@ device and after writing useful checkpoints.
 By default the vault lives at `~/.agent-handoff/vault`. Use `--home` or
 `--vault` when you need a different location. `agent-handoff sync` commits local
 vault changes, pulls/rebases remote vault changes, then pushes the result.
+If `sync init` says the local vault has unsynced memory and the remote already
+has data, back up or manually merge the local vault before joining that remote.
+If git reports a conflict or active operation, resolve the conflict in the vault,
+finish or abort the active git operation, then run `agent-handoff sync` again.
 
 ## How Projects Are Identified
 
@@ -167,7 +161,6 @@ agent-handoff enable      # create local memory and install the user skill
 agent-handoff start       # print context for the current project and branch
 agent-handoff checkpoint  # write a session checkpoint
 agent-handoff learn       # store durable global/project/branch memory
-agent-handoff sync create # create a private GitHub vault repo with gh
 agent-handoff sync init   # enable optional cross-device sync
 agent-handoff sync        # pull/rebase and push the vault
 agent-handoff status      # quick readiness and sync-state check

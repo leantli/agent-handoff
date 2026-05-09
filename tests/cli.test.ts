@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -41,56 +41,102 @@ function runCli(repo: string, ...args: string[]): { code: number; stdout: string
   return { code, stdout: stdout.text(), stderr: stderr.text() };
 }
 
-function withFakeGh(tmp: string): { path: string; log: string; remote: string } {
-  const bin = join(tmp, "bin");
-  const log = join(tmp, "gh.log");
-  const remote = join(tmp, "vault.git");
-  const state = join(tmp, "repo-created");
-  mkdirSync(bin, { recursive: true });
-  const gh = join(bin, "gh");
-  writeFileSync(
-    gh,
-    [
-      "#!/bin/sh",
-      `echo "$@" >> "${log}"`,
-      'if [ "$1" = "repo" ] && [ "$2" = "view" ]; then',
-      `  if [ -f "${state}" ]; then`,
-      `    printf '{"isPrivate":true,"nameWithOwner":"leantli/agent-handoff-vault","url":"file://${remote}","sshUrl":"file://${remote}"}'`,
-      "    exit 0",
-      "  fi",
-      "  echo 'repository not found' >&2",
-      "  exit 1",
-      "fi",
-      'if [ "$1" = "repo" ] && [ "$2" = "create" ]; then',
-      `  touch "${state}"`,
-      `  git init --bare "${remote}" >/dev/null 2>&1`,
-      "  exit 0",
-      "fi",
-      "exit 2",
-      "",
-    ].join("\n"),
-    "utf8",
-  );
-  chmodSync(gh, 0o755);
-  return { path: `${bin}:${process.env.PATH ?? ""}`, log, remote };
+function normalizeWhitespace(value: string): string {
+  return value.replace(/\s+/g, " ");
 }
 
-function withPath<T>(path: string, fn: () => T): T {
-  const oldPath = process.env.PATH;
-  process.env.PATH = path;
+function optionalGitLines(args: string[]): string[] | null {
+  if (!isGitWorktree(gitCommandCwd(args))) {
+    return null;
+  }
+  return gitLines(args);
+}
+
+function gitLines(args: string[]): string[] {
+  const output = execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  return output ? output.split(/\r?\n/) : [];
+}
+
+function isGitWorktree(cwd: string): boolean {
   try {
-    return fn();
-  } finally {
-    process.env.PATH = oldPath;
+    return gitLines(["-C", cwd, "rev-parse", "--is-inside-work-tree"])[0] === "true";
+  } catch {
+    return false;
   }
 }
 
+function gitCommandCwd(args: string[]): string {
+  const index = args.indexOf("-C");
+  if (index === -1) return process.cwd();
+  return args[index + 1] ?? process.cwd();
+}
+
 describe("cli", () => {
+  test("cli version is read from package metadata instead of a second literal", () => {
+    const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8"));
+
+    const result = runCli(process.cwd(), "--version");
+
+    expect(result.code).toBe(0);
+    expect(result.stdout.trim()).toBe(`agent-handoff ${pkg.version}`);
+    expect(readFileSync(join(process.cwd(), "src", "cli.ts"), "utf8")).not.toContain(
+      `agent-handoff ${pkg.version}`,
+    );
+  });
+
   test("package supports GitHub direct install by building on prepare", () => {
     const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8"));
 
     expect(pkg.scripts.prepare).toBe("npm run build");
     expect(pkg.scripts.prepack).toBeUndefined();
+  });
+
+  test("git-backed repository checks tolerate source archives without git metadata", () => {
+    const tmp = tempDir();
+
+    expect(optionalGitLines(["-C", tmp, "ls-files", "docs/plans"])).toBeNull();
+  });
+
+  test("git-backed repository checks surface git command errors inside a checkout", () => {
+    const insideWorktree = optionalGitLines(["rev-parse", "--is-inside-work-tree"]);
+    if (insideWorktree?.[0] !== "true") return;
+
+    expect(() => optionalGitLines(["definitely-not-a-git-command"])).toThrow();
+  });
+
+  test("repository does not keep tracked internal planning docs", () => {
+    const trackedPlanningDocs = optionalGitLines(["ls-files", "docs/plans"]);
+    if (trackedPlanningDocs) {
+      const deletedPlanningDocs = new Set(optionalGitLines(["ls-files", "--deleted", "docs/plans"]) ?? []);
+      const trackedPlanningDocsStillInWorktree = trackedPlanningDocs.filter(
+        (file) => !deletedPlanningDocs.has(file) && existsSync(join(process.cwd(), file)),
+      );
+
+      expect(trackedPlanningDocsStillInWorktree).toEqual([]);
+    }
+    expect(readFileSync(join(process.cwd(), ".gitignore"), "utf8").split(/\r?\n/)).toContain("docs/plans/");
+  });
+
+  test("docs tell users to use a private sync repository without advertising repo creation", () => {
+    const readme = normalizeWhitespace(readFileSync(join(process.cwd(), "README.md"), "utf8"));
+    const skill = normalizeWhitespace(
+      readFileSync(join(process.cwd(), "resources", "agent-handoff.SKILL.md"), "utf8"),
+    );
+
+    expect(readme).toContain("private");
+    expect(readme).toContain("dedicated private repository");
+    expect(readme).toContain("project code repository");
+    expect(readme).toContain("agent-handoff sync init");
+    expect(readme).toContain("unsynced memory");
+    expect(readme).toContain("back up or manually merge");
+    expect(readme).not.toContain("agent-handoff sync create");
+    expect(skill).toContain("private vault repository");
+    expect(skill).toContain("dedicated private vault repository");
+    expect(skill).toContain("project code repository");
+    expect(skill).toContain("agent-handoff sync init");
+    expect(skill).toContain("unsynced memory");
+    expect(skill).toContain("back up or manually merge");
+    expect(skill).not.toContain("agent-handoff sync create");
   });
 
   test("enable, checkpoint, and start flow without touching instruction files", () => {
@@ -256,25 +302,18 @@ describe("cli", () => {
     expect(status.stdout).toContain(`Sync: configured (${bare})`);
   });
 
-  test("sync create creates a private GitHub repository and configures sync", () => {
+  test("sync help does not expose repository creation", () => {
     const tmp = tempDir();
     const repo = join(tmp, "repo");
-    const home = join(tmp, "home");
     mkdirSync(repo);
-    const fakeGh = withFakeGh(tmp);
 
-    const result = withPath(fakeGh.path, () =>
-      runCli(repo, "--home", home, "sync", "create", "leantli/agent-handoff-vault"),
-    );
+    const result = runCli(repo, "sync", "--help");
 
     expect(result.code).toBe(0);
-    expect(result.stderr).toBe("");
-    expect(result.stdout).toContain("Created private GitHub repository: leantli/agent-handoff-vault");
-    expect(result.stdout).toContain(`Cross-device sync enabled: file://${fakeGh.remote}`);
-    expect(readFileSync(fakeGh.log, "utf8")).toContain(
-      "repo create leantli/agent-handoff-vault --private",
-    );
-    expect(readFileSync(join(home, "config.json"), "utf8")).toContain(`file://${fakeGh.remote}`);
+    expect(result.stdout).toContain("init");
+    expect(result.stdout).toContain("dedicated private");
+    expect(result.stdout).toContain("vault repository");
+    expect(result.stdout).not.toContain("create");
   });
 
   test("sync init fails for an unreachable sync remote", () => {

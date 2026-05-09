@@ -4,7 +4,6 @@ import { Command, CommanderError, Option } from "commander";
 import {
   HandoffError,
   buildStartPacket,
-  createGitHubSyncRepo,
   enableHandoff,
   enableSync,
   getStatus,
@@ -50,7 +49,7 @@ function buildProgram(
   program
     .name("agent-handoff")
     .description("Shared vault handoff memory for coding agents.")
-    .version("agent-handoff 0.5.3")
+    .version(`agent-handoff ${packageVersion()}`)
     .exitOverride()
     .configureOutput({
       writeOut: (str) => stdout.write(str),
@@ -123,25 +122,8 @@ function buildProgram(
 
   const sync = program.command("sync").description("Sync the handoff vault.");
   sync
-    .command("create <repository>")
-    .description("Create a private GitHub repository with gh and enable cross-device sync.")
-    .option("--vault <path>", "Vault directory. Defaults to HOME/vault.")
-    .addOption(new Option("--protocol <protocol>", "Git remote protocol to store in config.").choices(["https", "ssh"]).default("https"))
-    .action((repository: string, options: { vault?: string; protocol: "https" | "ssh" }) => {
-      const result = createGitHubSyncRepo({
-        home: globalHome(program),
-        vault: options.vault,
-        repository,
-        protocol: options.protocol,
-      });
-      stdout.write(`${result.created ? "Created" : "Using existing"} private GitHub repository: ${result.repository}\n`);
-      stdout.write(`Cross-device sync enabled: ${result.syncUrl}\n`);
-      stdout.write(`Vault: ${result.setup.vault}\n`);
-      stdout.write("Run agent-handoff sync to push local memory.\n");
-    });
-  sync
     .command("init <git-url>")
-    .description("Enable cross-device sync with a private git repository.")
+    .description("Enable cross-device sync with a dedicated private vault repository.")
     .option("--vault <path>", "Vault directory. Defaults to HOME/vault.")
     .action((gitUrl: string, options: { vault?: string }) => {
       const result = enableSync({ home: globalHome(program), vault: options.vault, syncUrl: gitUrl });
@@ -191,6 +173,16 @@ function readNote(options: NoteOptions, stdin?: { isTTY?: boolean }): string {
     throw new HandoffError("provide --note or --file, or pipe note text on stdin");
   }
   return readFileSync(0, "utf8");
+}
+
+function packageVersion(): string {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+    version?: unknown;
+  };
+  if (typeof pkg.version !== "string") {
+    throw new HandoffError("package.json is missing a string version");
+  }
+  return pkg.version;
 }
 
 function printProblems(problems: string[], stdout: NodeJS.WritableStream): void {

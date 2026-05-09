@@ -1,6 +1,5 @@
 import { execFileSync } from "node:child_process";
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -15,7 +14,6 @@ import { afterEach, describe, expect, test } from "vitest";
 import {
   HandoffError,
   buildStartPacket,
-  createGitHubSyncRepo,
   enableHandoff,
   enableSync,
   getStatus,
@@ -33,59 +31,6 @@ function tempDir(): string {
   const path = mkdtempSync(join(tmpdir(), "agent-handoff-test-"));
   temps.push(path);
   return path;
-}
-
-function withFakeGh(
-  tmp: string,
-  opts: { exists?: boolean; private?: boolean } = {},
-): { path: string; log: string; remote: string } {
-  const bin = join(tmp, "bin");
-  const log = join(tmp, "gh.log");
-  const remote = join(tmp, "vault.git");
-  const state = join(tmp, "repo-created");
-  mkdirSync(bin, { recursive: true });
-  if (opts.exists) {
-    writeFileSync(state, "1\n");
-    execFileSync("git", ["init", "--bare", remote]);
-  }
-  const isPrivate = opts.private ?? true;
-  const gh = join(bin, "gh");
-  writeFileSync(
-    gh,
-    [
-      "#!/bin/sh",
-      `echo "$@" >> "${log}"`,
-      'if [ "$1" = "repo" ] && [ "$2" = "view" ]; then',
-      `  if [ -f "${state}" ]; then`,
-      `    printf '{"isPrivate":${isPrivate ? "true" : "false"},"nameWithOwner":"leantli/agent-handoff-vault","url":"file://${remote}","sshUrl":"file://${remote}"}'`,
-      "    exit 0",
-      "  fi",
-      "  echo 'repository not found' >&2",
-      "  exit 1",
-      "fi",
-      'if [ "$1" = "repo" ] && [ "$2" = "create" ]; then',
-      `  touch "${state}"`,
-      `  git init --bare "${remote}" >/dev/null 2>&1`,
-      "  exit 0",
-      "fi",
-      "echo unexpected gh command >&2",
-      "exit 2",
-      "",
-    ].join("\n"),
-    "utf8",
-  );
-  chmodSync(gh, 0o755);
-  return { path: `${bin}:${process.env.PATH ?? ""}`, log, remote };
-}
-
-function withPath<T>(path: string, fn: () => T): T {
-  const oldPath = process.env.PATH;
-  process.env.PATH = path;
-  try {
-    return fn();
-  } finally {
-    process.env.PATH = oldPath;
-  }
 }
 
 afterEach(() => {
@@ -142,6 +87,58 @@ describe("vault setup", () => {
 
     expect(output).not.toContain("couldn't find remote ref");
     expect(output).not.toContain("could not find remote ref");
+  });
+
+  test("syncVault surfaces git conflicts for concurrent durable memory edits", () => {
+    const tmp = tempDir();
+    const bare = join(tmp, "vault.git");
+    const homeA = join(tmp, "home-a");
+    const homeB = join(tmp, "home-b");
+    execFileSync("git", ["init", "--bare", bare]);
+
+    setupHome({ home: homeA, syncUrl: bare });
+    learn("Base memory.", { home: homeA, kind: "lesson" });
+    syncVault({ home: homeA });
+    setupHome({ home: homeB, syncUrl: bare });
+
+    learn("Device A memory.", { home: homeA, kind: "lesson" });
+    syncVault({ home: homeA });
+    learn("Device B concurrent memory.", { home: homeB, kind: "lesson" });
+
+    const message = `sync conflict in ${join(homeB, "vault")}; resolve conflicts in that vault, finish or abort the active git operation, then run agent-handoff sync again`;
+    expect(() => syncVault({ home: homeB })).toThrow(message);
+    expect(() => syncVault({ home: homeB })).toThrow(message);
+  });
+
+  test("syncVault reports active rebase after conflicts are staged but not continued", () => {
+    const tmp = tempDir();
+    const bare = join(tmp, "vault.git");
+    const homeA = join(tmp, "home-a");
+    const homeB = join(tmp, "home-b");
+    const vaultB = join(homeB, "vault");
+    execFileSync("git", ["init", "--bare", bare]);
+
+    setupHome({ home: homeA, syncUrl: bare });
+    learn("Base memory.", { home: homeA, kind: "lesson" });
+    syncVault({ home: homeA });
+    setupHome({ home: homeB, syncUrl: bare });
+
+    learn("Device A memory.", { home: homeA, kind: "lesson" });
+    syncVault({ home: homeA });
+    learn("Device B concurrent memory.", { home: homeB, kind: "lesson" });
+
+    const message = `sync conflict in ${vaultB}; resolve conflicts in that vault, finish or abort the active git operation, then run agent-handoff sync again`;
+    expect(() => syncVault({ home: homeB })).toThrow(message);
+
+    const lessons = join(vaultB, "global", "lessons.md");
+    const resolved = readFileSync(lessons, "utf8")
+      .replace(/^<<<<<<<.*\n/gm, "")
+      .replace(/^=======\n/gm, "")
+      .replace(/^>>>>>>>.*\n/gm, "");
+    writeFileSync(lessons, resolved, "utf8");
+    execFileSync("git", ["add", "global/lessons.md"], { cwd: vaultB });
+
+    expect(() => syncVault({ home: homeB })).toThrow(message);
   });
 
   test("enableSync replaces a fresh local seed vault with remote memory", () => {
@@ -424,41 +421,6 @@ describe("start, checkpoint, and learn", () => {
     expect(result.vault).toBe(resolve(home, "vault"));
     expect(config.sync_url).toBe(bare);
     expect(existsSync(join(home, "vault", ".git"))).toBe(true);
-  });
-
-  test("createGitHubSyncRepo creates a private repository and configures sync", () => {
-    const tmp = tempDir();
-    const home = join(tmp, "home");
-    const fakeGh = withFakeGh(tmp);
-
-    const result = withPath(fakeGh.path, () =>
-      createGitHubSyncRepo({ home, repository: "leantli/agent-handoff-vault" }),
-    );
-
-    expect(result.created).toBe(true);
-    expect(result.isPrivate).toBe(true);
-    expect(result.syncUrl).toBe(`file://${fakeGh.remote}`);
-    expect(readFileSync(fakeGh.log, "utf8")).toContain(
-      "repo create leantli/agent-handoff-vault --private",
-    );
-    expect(readFileSync(join(home, "config.json"), "utf8")).toContain(`file://${fakeGh.remote}`);
-
-    learn("Created vault can sync.", { home, kind: "lesson" });
-    expect(() => syncVault({ home })).not.toThrow();
-  });
-
-  test("createGitHubSyncRepo refuses an existing public repository", () => {
-    const tmp = tempDir();
-    const home = join(tmp, "home");
-    const fakeGh = withFakeGh(tmp, { exists: true, private: false });
-
-    expect(() =>
-      withPath(fakeGh.path, () =>
-        createGitHubSyncRepo({ home, repository: "leantli/agent-handoff-vault" }),
-      ),
-    ).toThrow("is public");
-    expect(existsSync(join(home, "config.json"))).toBe(false);
-    expect(readFileSync(fakeGh.log, "utf8")).not.toContain("repo create");
   });
 
   test("enableSync rejects an unreachable sync remote without marking sync configured", () => {

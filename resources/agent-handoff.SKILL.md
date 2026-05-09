@@ -24,20 +24,12 @@ agent-handoff.
 
 ## Cross-Device Sync Setup
 
-Use a private vault repository for sync. The vault can contain project context,
-preferences, decisions, and handoff notes.
+Use a dedicated private vault repository for sync. Do not use a project code
+repository as the vault. The vault can contain project context, preferences,
+decisions, and handoff notes.
 
-If the user asks you to create the GitHub sync repository, run:
-
-```bash
-agent-handoff sync create <owner>/<repo>
-agent-handoff sync
-```
-
-`sync create` uses GitHub CLI (`gh`) and creates the repository as private. If an
-existing repository is public, do not use it for sync.
-
-If the user already has a private git repository for the vault, run:
+If the user asks you to set up cross-device sync, make sure the vault repository
+they created is private, then run:
 
 ```bash
 agent-handoff sync init <private-git-url>
@@ -46,6 +38,15 @@ agent-handoff sync
 
 On another device, install and enable the CLI, then run `sync init` with the same
 private git URL, `agent-handoff sync`, and `agent-handoff start`.
+
+If `sync init` says the local vault has unsynced memory and the remote already
+has data, keep the local files and report it. The user or agent should back up
+or manually merge the local vault before joining that remote.
+
+If sync fails because git reports a conflict or active operation, keep the local
+files and report the conflict. The user or agent should resolve it inside the
+vault, finish or abort the active git operation, then run `agent-handoff sync`
+again.
 
 ## During Work
 

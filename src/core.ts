@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { hostname, homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const DEFAULT_HOME = join(homedir(), ".agent-handoff");
@@ -44,14 +44,6 @@ export interface EnableResult {
   skill: InstallSkillResult;
 }
 
-export interface CreateGitHubSyncRepoResult {
-  repository: string;
-  created: boolean;
-  isPrivate: boolean;
-  syncUrl: string;
-  setup: SetupResult;
-}
-
 export interface CheckpointResult {
   path: string;
   projectId: string;
@@ -83,15 +75,6 @@ interface Config {
   version: number;
   vault: string;
   sync_url?: string;
-}
-
-type GitHubRemoteProtocol = "https" | "ssh";
-
-interface GitHubRepoInfo {
-  nameWithOwner?: string;
-  isPrivate: boolean;
-  url?: string;
-  sshUrl?: string;
 }
 
 export function setupHome(opts: {
@@ -229,48 +212,6 @@ export function enableSync(opts: {
   syncUrl: string;
 }): SetupResult {
   return setupHome({ home: opts.home, vault: opts.vault, syncUrl: opts.syncUrl });
-}
-
-export function createGitHubSyncRepo(opts: {
-  home?: string;
-  vault?: string;
-  repository: string;
-  protocol?: GitHubRemoteProtocol;
-}): CreateGitHubSyncRepoResult {
-  const repository = normalizeGitHubRepository(opts.repository);
-  const protocol = opts.protocol ?? "https";
-  let created = false;
-  let info = inspectGitHubRepo(repository);
-
-  if (!info) {
-    ghChecked([
-      "repo",
-      "create",
-      repository,
-      "--private",
-      "--description",
-      "Private vault for agent-handoff shared coding-agent context.",
-    ]);
-    created = true;
-    info = inspectGitHubRepo(repository);
-    if (!info) {
-      throw new HandoffError(`created GitHub repository ${repository} but could not inspect it with gh`);
-    }
-  }
-
-  if (!info.isPrivate) {
-    throw new HandoffError(`GitHub repository ${repository} is public; use a private repository for agent-handoff sync`);
-  }
-
-  const syncUrl = githubRepoSyncUrl(info, protocol);
-  const setup = enableSync({ home: opts.home, vault: opts.vault, syncUrl });
-  return {
-    repository: info.nameWithOwner ?? repository,
-    created,
-    isPrivate: info.isPrivate,
-    syncUrl,
-    setup,
-  };
 }
 
 export function deriveProjectId(root = ".", projectId?: string): string {
@@ -425,6 +366,10 @@ export function syncVault(opts: { home?: string } = {}): string[] {
   if (syncProblem) throw new HandoffError(syncProblem);
   const outputs: string[] = [];
 
+  if (hasActiveGitOperation(setup.vault) || hasUnmergedFiles(setup.vault)) {
+    throw syncConflictError(setup.vault);
+  }
+
   gitChecked(setup.vault, ["add", "-A"]);
   const staged = gitRun(setup.vault, ["diff", "--cached", "--quiet"]).status !== 0;
   if (staged) {
@@ -445,6 +390,9 @@ export function syncVault(opts: { home?: string } = {}): string[] {
   const pull = gitRun(setup.vault, ["pull", "--rebase", "--autostash", "origin", branch]);
   const ignoredEmptyRemotePull = pull.status !== 0 && isEmptyRemotePull(pull.output);
   if (pull.status !== 0 && !ignoredEmptyRemotePull) {
+    if (hasActiveGitOperation(setup.vault) || hasUnmergedFiles(setup.vault)) {
+      throw syncConflictError(setup.vault, pull.output);
+    }
     throw new HandoffError(pull.output.trim() || "git pull failed");
   }
   if (!ignoredEmptyRemotePull && pull.output.trim()) outputs.push(pull.output.trim());
@@ -638,56 +586,6 @@ function syncConfigProblem(vault: string, syncUrl: string): string | null {
     return `sync is configured for ${syncUrl} but vault origin is ${origin}; run agent-handoff sync init ${syncUrl}`;
   }
   return null;
-}
-
-function normalizeGitHubRepository(value: string): string {
-  const repository = value.trim().replace(/\/+$/g, "").replace(/\.git$/i, "");
-  if (repository.includes("://") || repository.startsWith("git@")) {
-    throw new HandoffError("GitHub repository must be in owner/name form, for example leantli/agent-handoff-vault");
-  }
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
-    throw new HandoffError("GitHub repository must be in owner/name form, for example leantli/agent-handoff-vault");
-  }
-  return repository;
-}
-
-function inspectGitHubRepo(repository: string): GitHubRepoInfo | null {
-  const result = ghRun(["repo", "view", repository, "--json", "nameWithOwner,isPrivate,url,sshUrl"]);
-  if (result.status !== 0) {
-    if (/could not resolve|not found|repository not found/i.test(result.output)) return null;
-    throw new HandoffError(result.output.trim() || `cannot inspect GitHub repository ${repository} with gh`);
-  }
-  let raw: unknown;
-  try {
-    raw = JSON.parse(result.output);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new HandoffError(`gh repo view returned invalid JSON: ${detail}`);
-  }
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new HandoffError("gh repo view returned invalid repository data");
-  }
-  const data = raw as Record<string, unknown>;
-  if (typeof data.isPrivate !== "boolean") {
-    throw new HandoffError("gh repo view returned invalid repository privacy data");
-  }
-  return {
-    nameWithOwner: typeof data.nameWithOwner === "string" ? data.nameWithOwner : undefined,
-    isPrivate: data.isPrivate,
-    url: typeof data.url === "string" ? data.url : undefined,
-    sshUrl: typeof data.sshUrl === "string" ? data.sshUrl : undefined,
-  };
-}
-
-function githubRepoSyncUrl(info: GitHubRepoInfo, protocol: GitHubRemoteProtocol): string {
-  const raw = protocol === "ssh" ? info.sshUrl : info.url;
-  if (!raw) {
-    throw new HandoffError(`GitHub repository is missing a ${protocol} clone URL`);
-  }
-  if (raw.startsWith("https://github.com/") && !raw.endsWith(".git")) {
-    return `${raw}.git`;
-  }
-  return raw;
 }
 
 function loadSetup(home?: string): SetupResult {
@@ -966,28 +864,6 @@ function gitChecked(root: string, args: string[]): string {
   return result.output.trim();
 }
 
-function ghChecked(args: string[]): string {
-  const result = ghRun(args);
-  if (result.status !== 0) {
-    throw new HandoffError(result.output.trim() || `gh ${args.join(" ")} failed`);
-  }
-  return result.output.trim();
-}
-
-function ghRun(args: string[]): { status: number; output: string } {
-  const result = spawnSync("gh", args, {
-    encoding: "utf8",
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: GIT_TIMEOUT_MS,
-  });
-  const error = result.error ? `\n${result.error.message}` : "";
-  return {
-    status: result.status ?? 1,
-    output: `${result.stdout ?? ""}${result.stderr ?? ""}${error}`,
-  };
-}
-
 function gitRun(root: string, args: string[]): { status: number; output: string } {
   const result = spawnSync("git", args, {
     cwd: root,
@@ -1001,6 +877,29 @@ function gitRun(root: string, args: string[]): { status: number; output: string 
     status: result.status ?? 1,
     output: `${result.stdout ?? ""}${result.stderr ?? ""}${error}`,
   };
+}
+
+function hasUnmergedFiles(vault: string): boolean {
+  const result = gitRun(vault, ["diff", "--name-only", "--diff-filter=U"]);
+  return result.status === 0 && result.output.trim().length > 0;
+}
+
+function hasActiveGitOperation(vault: string): boolean {
+  return ["rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"].some((name) =>
+    gitPathExists(vault, name),
+  );
+}
+
+function gitPathExists(vault: string, name: string): boolean {
+  const path = gitOutput(vault, ["rev-parse", "--git-path", name]);
+  if (!path) return false;
+  return existsSync(isAbsolute(path) ? path : join(vault, path));
+}
+
+function syncConflictError(vault: string, detail?: string): HandoffError {
+  const message = `sync conflict in ${vault}; resolve conflicts in that vault, finish or abort the active git operation, then run agent-handoff sync again`;
+  const trimmed = detail?.trim();
+  return new HandoffError(trimmed ? `${message}\n\n${trimmed}` : message);
 }
 
 function isEmptyRemotePull(output: string): boolean {
