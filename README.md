@@ -62,12 +62,34 @@ When the user gives a stable preference or recurring correction:
 agent-handoff learn --kind preference --note "Prefer small focused diffs."
 ```
 
-For project-specific decisions or branch-specific context:
+For project-specific decisions, and optional branch-specific context:
 
 ```bash
 agent-handoff learn --scope project --kind decision --note "Use TypeScript for the CLI."
 agent-handoff learn --scope branch --kind context --note "This branch is testing the sync workflow."
 ```
+
+## Memory Model
+
+Think of `agent-handoff` as a shared handoff notebook with three layers:
+
+- `global`: who the user is and how they prefer agents to work across projects.
+- `project`: what this repository is, how it works, and what decisions matter here.
+- `checkpoint`: where the current task stopped and what the next agent should do.
+
+Most users only need to choose between durable memory and a checkpoint:
+
+- Use `learn` for durable memory that future sessions should reuse.
+- Use `checkpoint` for temporary handoff state before switching sessions, clones,
+  worktrees, or devices.
+- Use global memory only for facts that should follow the user across projects.
+  If a fact is repo-specific, keep it in project memory. Use branch context only
+  for branch-specific work.
+- Never store secrets, tokens, credentials, or private customer data.
+
+The `learn --kind` values are lightweight labels for agents. They help separate
+preferences, project decisions, lessons, and context, but they are not the main
+user-facing concept.
 
 ## Cross-Device Sync
 
@@ -126,7 +148,7 @@ run `agent-handoff start`, `checkpoint`, and project or branch `learn` commands
 from `~/workspace/app-one`, `~/workspace/app-two`, or whichever repository is
 actually being edited. Global preferences can be written from anywhere.
 
-## What Gets Stored
+## Vault Layout
 
 ```text
 ~/.agent-handoff/
@@ -147,12 +169,14 @@ actually being edited. Global preferences can be written from anywhere.
           20260508T103000Z-laptop-codex-main.md
 ```
 
-The layers are:
+The vault stores that model as directories and Markdown files:
 
-- `global`: preferences and lessons that apply across projects.
-- `project`: durable background, decisions, and preferences for one repository.
-- `branch`: task or branch-specific context.
-- `checkpoints`: recent session handoff notes.
+- `global/`: preferences and lessons that apply across projects.
+- `projects/<project-id>/project.md`, `decisions.md`, and `preferences.md`:
+  durable memory for one repository.
+- Branch files under `projects/<project-id>/branches/` are project-scoped
+  context, not a fourth user-facing layer.
+- `projects/<project-id>/checkpoints/*.md`: recent session handoff notes.
 
 ## Commands
 
@@ -160,7 +184,7 @@ The layers are:
 agent-handoff enable      # create local memory and install the user skill
 agent-handoff start       # print context for the current project and branch
 agent-handoff checkpoint  # write a session checkpoint
-agent-handoff learn       # store durable global/project/branch memory
+agent-handoff learn       # store durable handoff memory
 agent-handoff sync init   # enable optional cross-device sync
 agent-handoff sync        # pull/rebase and push the vault
 agent-handoff status      # quick readiness and sync-state check
