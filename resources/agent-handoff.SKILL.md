@@ -50,8 +50,22 @@ again.
 
 ## During Work
 
-Use `learn` only for stable facts that should survive future sessions, clones,
-worktrees, and devices.
+Treat `agent-handoff` as a shared handoff notebook, not a knowledge base.
+Use `learn` for durable memory and `checkpoint` for temporary task state.
+Before writing memory, choose one of three layers:
+
+- Global: user preferences or recurring corrections that should apply across
+  projects. Usually write these with `learn --kind preference` or
+  `learn --kind lesson`.
+- Project: durable repo background, conventions, decisions, and project-specific
+  preferences. Usually write these with `learn --scope project`.
+- Checkpoint: temporary task state for the next session. Use `checkpoint`, not
+  `learn`.
+
+Within project memory, use branch scope only for branch-specific context that
+should survive a restart but should not apply to the whole project. If in doubt
+between global and project, choose project. Do not store low-value observations,
+one-off command output, secrets, tokens, credentials, or private customer data.
 
 For a durable user preference or recurring correction:
 
@@ -98,6 +112,5 @@ If sync fails, keep the local checkpoint and report the error.
 
 - Do not store secrets, tokens, credentials, or private customer data in handoff notes.
 - Keep checkpoints factual and concise.
-- Do not use `learn` for temporary task state; use `checkpoint` instead.
 - Prefer project or branch scope for project-specific facts instead of global memory.
 - Do not modify repository instruction files as part of agent-handoff installation or use.

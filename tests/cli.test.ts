@@ -139,6 +139,35 @@ describe("cli", () => {
     expect(skill).not.toContain("agent-handoff sync create");
   });
 
+  test("docs explain memory boundaries for users and agents", () => {
+    const readme = normalizeWhitespace(readFileSync(join(process.cwd(), "README.md"), "utf8"));
+    const skill = normalizeWhitespace(
+      readFileSync(join(process.cwd(), "resources", "agent-handoff.SKILL.md"), "utf8"),
+    );
+
+    expect(readme).toContain("shared handoff notebook");
+    expect(readme).toContain("three layers");
+    expect(readme).toContain("`global`: who the user is");
+    expect(readme).toContain("`project`: what this repository is");
+    expect(readme).toContain("`checkpoint`: where the current task stopped");
+    expect(readme).toContain("Vault Layout");
+    expect(readme).toContain("The vault stores that model as directories and Markdown files");
+    expect(readme).toContain("Branch files under");
+    expect(readme).toContain("are project-scoped context, not a fourth user-facing layer");
+    expect(readme).toContain("Use branch context only for branch-specific work");
+    expect(readme).not.toContain("The layers are:");
+    expect(readme).not.toContain("project or branch memory");
+    expect(readme).not.toContain("global/project/branch memory");
+
+    expect(skill).toContain("shared handoff notebook, not a knowledge base");
+    expect(skill).toContain("choose one of three layers");
+    expect(skill).toContain("Use `learn` for durable memory and `checkpoint` for temporary task state");
+    expect(skill).toContain("Within project memory, use branch scope only");
+    expect(skill).toContain("If in doubt between global and project, choose project");
+    expect(skill).toContain("Do not store low-value observations");
+    expect(skill).not.toContain("Do not use `learn` for temporary task state; use `checkpoint` instead.");
+  });
+
   test("enable, checkpoint, and start flow without touching instruction files", () => {
     const tmp = tempDir();
     const repo = join(tmp, "repo");
