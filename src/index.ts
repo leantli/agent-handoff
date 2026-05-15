@@ -4,6 +4,7 @@ export {
   enableHandoff,
   enableSync,
   getStatus,
+  installSkill,
   learn,
   normalizeProjectId,
   syncVault,
@@ -13,6 +14,8 @@ export {
 export type {
   CheckpointResult,
   EnableResult,
+  InstallSkillResult,
   LearnResult,
+  SetupResult,
   Status,
 } from "./core.js";

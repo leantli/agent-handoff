@@ -27,7 +27,8 @@ agent-handoff enable
 `enable` does two things:
 
 - creates local memory under `~/.agent-handoff`
-- installs the packaged skill under `~/.agents/skills/agent-handoff`
+- installs the packaged skill for Codex under `~/.agents/skills/agent-handoff`
+  and for Claude Code under `~/.claude/skills/agent-handoff`
 
 Agents that load user-level skills can then discover when to run
 `agent-handoff start`, `checkpoint`, `learn`, and `sync`. Existing agent

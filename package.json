@@ -8,7 +8,14 @@
   "bin": {
     "agent-handoff": "dist/bin.js"
   },
+  "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "files": [
     "dist",
     "resources",
@@ -18,6 +25,8 @@
   "scripts": {
     "build": "tsc",
     "prepare": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build && npm run smoke:import",
+    "smoke:import": "node -e \"import('./dist/index.js').then((m) => { if (!m.enableHandoff || !m.installSkill || !m.syncVault) process.exit(1); })\"",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
