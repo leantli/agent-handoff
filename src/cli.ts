@@ -78,7 +78,10 @@ function buildProgram(
       stdout.write(`Vault: ${result.setup.vault}\n`);
       stdout.write("Skills:\n");
       for (const skill of result.skills) {
-        stdout.write(`- ${skill.path}\n`);
+        stdout.write(`- ${skill.path} (${skill.registration})\n`);
+        if (skill.backupPath) {
+          stdout.write(`  backed up previous registration: ${skill.backupPath}\n`);
+        }
       }
     });
 

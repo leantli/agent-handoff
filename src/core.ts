@@ -2,16 +2,20 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
+  cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   renameSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { hostname, homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const DEFAULT_HOME = join(userHome(), ".agent-handoff");
@@ -24,6 +28,7 @@ const SECRET_PATTERNS = [
   /\bsk-[A-Za-z0-9_-]{8,}\b/,
 ];
 const GIT_TIMEOUT_MS = 30_000;
+const MANAGED_SKILL_MARKER = ".agent-handoff-managed.json";
 
 type LearnScope = "global" | "project" | "branch";
 type LearnKind = "preference" | "lesson" | "decision" | "context";
@@ -64,6 +69,9 @@ export interface LearnResult {
 
 export interface InstallSkillResult {
   path: string;
+  canonicalPath: string;
+  registration: "symlink" | "copy";
+  backupPath?: string;
   updated: boolean;
 }
 
@@ -193,28 +201,41 @@ export function normalizeProjectId(value: string): string {
   return safeProjectId([host.toLowerCase(), ...path.split("/").filter(Boolean)].join("__"));
 }
 
-export function installSkill(opts: { skillsHome?: string } = {}): InstallSkillResult {
+export function installSkill(opts: { home?: string; skillsHome?: string } = {}): InstallSkillResult {
+  const homePath = resolveHome(opts.home);
+  const canonicalDir = join(homePath, "skills", "agent-handoff");
+  const canonicalPath = join(canonicalDir, "SKILL.md");
+  mkdirSync(canonicalDir, { recursive: true });
+  const content = readResource("agent-handoff.SKILL.md");
+  let updated = !existsSync(canonicalPath) || readFileSync(canonicalPath, "utf8") !== content;
+  if (updated) {
+    writeTextFile(canonicalPath, content);
+  }
+
   const skillsHome = opts.skillsHome
     ? resolve(opts.skillsHome)
     : resolve(join(userHome(), ".agents", "skills"));
-  const skillDir = join(skillsHome, "agent-handoff");
-  mkdirSync(skillDir, { recursive: true });
-  const path = join(skillDir, "SKILL.md");
-  const content = readResource("agent-handoff.SKILL.md");
-  const updated = !existsSync(path) || readFileSync(path, "utf8") !== content;
-  if (updated) {
-    writeTextFile(path, content);
-  }
-  return { path, updated };
+  const registrationDir = join(skillsHome, "agent-handoff");
+  const registration = registerSkillDirectory(canonicalDir, registrationDir);
+  updated = updated || registration.updated;
+  return {
+    path: join(registrationDir, "SKILL.md"),
+    canonicalPath,
+    registration: registration.kind,
+    backupPath: registration.backupPath,
+    updated,
+  };
 }
 
 function installEnabledSkills(opts: {
+  home?: string;
   skillsHome?: string;
   claudeSkillsHome?: string;
 } = {}): InstallSkillResult[] {
-  const primary = installSkill({ skillsHome: opts.skillsHome });
+  const primary = installSkill({ home: opts.home, skillsHome: opts.skillsHome });
   const skills = [primary];
   const claude = installSkill({
+    home: opts.home,
     skillsHome: opts.claudeSkillsHome ?? join(userHome(), ".claude", "skills"),
   });
   if (claude.path !== primary.path) {
@@ -232,6 +253,7 @@ export function enableHandoff(opts: {
 } = {}): EnableResult {
   const setup = setupHome({ home: opts.home, vault: opts.vault });
   const skills = installEnabledSkills({
+    home: setup.home,
     skillsHome: opts.skillsHome,
     claudeSkillsHome: opts.claudeSkillsHome,
   });
@@ -244,6 +266,108 @@ export function enableSync(opts: {
   syncUrl: string;
 }): SetupResult {
   return setupHome({ home: opts.home, vault: opts.vault, syncUrl: opts.syncUrl });
+}
+
+function registerSkillDirectory(
+  canonicalDir: string,
+  registrationDir: string,
+): { updated: boolean; kind: "symlink" | "copy"; backupPath?: string } {
+  if (resolve(canonicalDir) === resolve(registrationDir)) {
+    return { updated: false, kind: "copy" };
+  }
+
+  mkdirSync(dirname(registrationDir), { recursive: true });
+  let backupPath: string | undefined;
+
+  if (lexistsSync(registrationDir)) {
+    const stat = lstatSync(registrationDir);
+    if (stat.isSymbolicLink()) {
+      if (sameRealPath(registrationDir, canonicalDir)) {
+        return { updated: false, kind: "symlink" };
+      }
+      backupPath = backupExistingRegistration(registrationDir);
+    } else {
+      if (stat.isDirectory() && isManagedCopyCurrent(registrationDir, canonicalDir)) {
+        return { updated: false, kind: "copy" };
+      }
+      if (stat.isDirectory() && isManagedCopy(registrationDir, canonicalDir)) {
+        copySkillDirectory(canonicalDir, registrationDir);
+        return { updated: true, kind: "copy" };
+      }
+      backupPath = backupExistingRegistration(registrationDir);
+    }
+  }
+
+  try {
+    symlinkSync(canonicalDir, registrationDir, process.platform === "win32" ? "junction" : "dir");
+    return { updated: true, kind: "symlink", backupPath };
+  } catch {
+    copySkillDirectory(canonicalDir, registrationDir);
+    return { updated: true, kind: "copy", backupPath };
+  }
+}
+
+function lexistsSync(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sameRealPath(left: string, right: string): boolean {
+  try {
+    return realpathSync(left) === realpathSync(right);
+  } catch {
+    return false;
+  }
+}
+
+function backupExistingRegistration(path: string): string {
+  const stamp = compactTimestamp(timestamp());
+  let backupPath = join(dirname(path), `${basename(path)}.bak-${stamp}`);
+  let index = 2;
+  while (lexistsSync(backupPath)) {
+    backupPath = join(dirname(path), `${basename(path)}.bak-${stamp}-${index}`);
+    index += 1;
+  }
+  renameSync(path, backupPath);
+  return backupPath;
+}
+
+function isManagedCopyCurrent(registrationDir: string, canonicalDir: string): boolean {
+  return (
+    isManagedCopy(registrationDir, canonicalDir) &&
+    readOptionalFile(join(registrationDir, "SKILL.md")) === readOptionalFile(join(canonicalDir, "SKILL.md"))
+  );
+}
+
+function isManagedCopy(path: string, canonicalDir: string): boolean {
+  const marker = readOptionalFile(join(path, MANAGED_SKILL_MARKER));
+  if (!marker) return false;
+  try {
+    const data = JSON.parse(marker) as { canonical_path?: unknown; managed_by?: unknown };
+    return data.managed_by === "agent-handoff" && data.canonical_path === canonicalDir;
+  } catch {
+    return false;
+  }
+}
+
+function readOptionalFile(path: string): string | null {
+  return existsSync(path) ? readFileSync(path, "utf8") : null;
+}
+
+function copySkillDirectory(canonicalDir: string, registrationDir: string): void {
+  mkdirSync(registrationDir, { recursive: true });
+  cpSync(canonicalDir, registrationDir, { recursive: true, force: true });
+  writeTextFile(
+    join(registrationDir, MANAGED_SKILL_MARKER),
+    json({
+      managed_by: "agent-handoff",
+      canonical_path: canonicalDir,
+    }),
+  );
 }
 
 export function deriveProjectId(root = ".", projectId?: string): string {

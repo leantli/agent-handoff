@@ -1,14 +1,17 @@
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import {
@@ -68,6 +71,15 @@ function execGit(args: string[], options: { cwd?: string; encoding?: BufferEncod
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
+}
+
+function expectRegisteredSkill(registrationDir: string, canonicalDir: string): void {
+  expect(existsSync(join(registrationDir, "SKILL.md"))).toBe(true);
+  expect(readFileSync(join(registrationDir, "SKILL.md"), "utf8")).toContain("agent-handoff start");
+  if (process.platform !== "win32") {
+    expect(lstatSync(registrationDir).isSymbolicLink()).toBe(true);
+    expect(realpathSync(registrationDir)).toBe(realpathSync(canonicalDir));
+  }
 }
 
 beforeEach(() => {
@@ -252,18 +264,23 @@ describe("vault setup", () => {
     );
   });
 
-  test("installSkill writes user skill", () => {
+  test("installSkill writes the canonical skill and registers a user skill symlink", () => {
     const tmp = tempDir();
+    const home = join(tmp, "home");
     const skillsHome = join(tmp, "skills");
 
-    const result = installSkill({ skillsHome });
+    const result = installSkill({ home, skillsHome });
 
+    const canonicalDir = join(home, "skills", "agent-handoff");
+    const registrationDir = join(skillsHome, "agent-handoff");
+    expect(existsSync(join(canonicalDir, "SKILL.md"))).toBe(true);
+    expectRegisteredSkill(registrationDir, canonicalDir);
     expect(existsSync(result.path)).toBe(true);
     expect(readFileSync(result.path, "utf8")).toContain("agent-handoff start");
-    expect(result.path).toBe(resolve(skillsHome, "agent-handoff", "SKILL.md"));
+    expect(result.path).toBe(resolve(registrationDir, "SKILL.md"));
   });
 
-  test("enableHandoff creates local memory and installs the user skill", () => {
+  test("enableHandoff creates local memory and registers Codex and Claude Code skills to the same canonical skill", () => {
     const tmp = tempDir();
     const home = join(tmp, "home");
     const skillsHome = join(tmp, "skills");
@@ -273,8 +290,9 @@ describe("vault setup", () => {
 
     expect(result.setup.home).toBe(resolve(home));
     expect(existsSync(join(home, "vault", "global", "preferences.md"))).toBe(true);
-    expect(existsSync(join(skillsHome, "agent-handoff", "SKILL.md"))).toBe(true);
-    expect(existsSync(join(claudeSkillsHome, "agent-handoff", "SKILL.md"))).toBe(true);
+    const canonicalDir = join(home, "skills", "agent-handoff");
+    expectRegisteredSkill(join(skillsHome, "agent-handoff"), canonicalDir);
+    expectRegisteredSkill(join(claudeSkillsHome, "agent-handoff"), canonicalDir);
     expect(result.skills.map((skill) => skill.path)).toEqual([
       resolve(skillsHome, "agent-handoff", "SKILL.md"),
       resolve(claudeSkillsHome, "agent-handoff", "SKILL.md"),
@@ -295,6 +313,109 @@ describe("vault setup", () => {
       expect(existsSync(claudeSkill)).toBe(true);
       expect(result.skills.map((skill) => skill.path)).toContain(claudeSkill);
     });
+  });
+
+  test("enableHandoff defaults Codex registration to the official ~/.agents skill root", () => {
+    const tmp = tempDir();
+    const fakeUserHome = join(tmp, "user-home");
+    const home = join(tmp, "home");
+
+    withHome(fakeUserHome, () => {
+      const result = enableHandoff({ home });
+
+      const codexSkill = resolve(fakeUserHome, ".agents", "skills", "agent-handoff", "SKILL.md");
+      const legacyCodexSkill = resolve(fakeUserHome, ".codex", "skills", "agent-handoff", "SKILL.md");
+      expect(result.skills.map((skill) => skill.path)).toContain(codexSkill);
+      expect(existsSync(codexSkill)).toBe(true);
+      expect(existsSync(legacyCodexSkill)).toBe(false);
+    });
+  });
+
+  test("installSkill backs up an existing user skill directory before registering", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const skillsHome = join(tmp, "skills");
+    const registrationDir = join(skillsHome, "agent-handoff");
+    mkdirSync(registrationDir, { recursive: true });
+    writeFileSync(join(registrationDir, "SKILL.md"), "---\nname: my-custom\n---\n# user skill\n");
+    writeFileSync(join(registrationDir, "extra.md"), "user content");
+
+    const result = installSkill({ home, skillsHome });
+
+    expect(result.backupPath).toBeDefined();
+    expect(readFileSync(join(result.backupPath!, "SKILL.md"), "utf8")).toContain("my-custom");
+    expect(readFileSync(join(result.backupPath!, "extra.md"), "utf8")).toBe("user content");
+    expect(readFileSync(result.path, "utf8")).toContain("agent-handoff start");
+    if (process.platform !== "win32") {
+      expect(lstatSync(registrationDir).isSymbolicLink()).toBe(true);
+    }
+  });
+
+  test("installSkill backs up a previous plain-directory install before migrating to symlink", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const skillsHome = join(tmp, "skills");
+    const registrationDir = join(skillsHome, "agent-handoff");
+    mkdirSync(registrationDir, { recursive: true });
+    writeFileSync(join(registrationDir, "SKILL.md"), "---\nname: agent-handoff\n---\n# old version\n");
+
+    const result = installSkill({ home, skillsHome });
+
+    expect(result.backupPath).toBeDefined();
+    expect(readFileSync(join(result.backupPath!, "SKILL.md"), "utf8")).toContain("# old version");
+    expect(readFileSync(result.path, "utf8")).toContain("agent-handoff start");
+  });
+
+  test("installSkill does not trust a managed-copy marker from another canonical path", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const skillsHome = join(tmp, "skills");
+    const registrationDir = join(skillsHome, "agent-handoff");
+    mkdirSync(registrationDir, { recursive: true });
+    writeFileSync(join(registrationDir, "SKILL.md"), "---\nname: custom-agent-handoff\n---\n# custom\n");
+    writeFileSync(
+      join(registrationDir, ".agent-handoff-managed.json"),
+      JSON.stringify({ managed_by: "agent-handoff", canonical_path: join(tmp, "other-home", "skills", "agent-handoff") }),
+    );
+
+    const result = installSkill({ home, skillsHome });
+
+    expect(result.backupPath).toBeDefined();
+    expect(readFileSync(join(result.backupPath!, "SKILL.md"), "utf8")).toContain("# custom");
+    expect(readFileSync(result.path, "utf8")).toContain("agent-handoff start");
+  });
+
+  test("installSkill backs up a wrong symlink before registering the canonical skill", () => {
+    if (process.platform === "win32") return;
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const skillsHome = join(tmp, "skills");
+    const registrationDir = join(skillsHome, "agent-handoff");
+    const otherDir = join(tmp, "other-skill");
+    mkdirSync(dirname(registrationDir), { recursive: true });
+    mkdirSync(otherDir, { recursive: true });
+    writeFileSync(join(otherDir, "SKILL.md"), "---\nname: other\n---\n");
+    symlinkSync(otherDir, registrationDir, "dir");
+
+    const result = installSkill({ home, skillsHome });
+
+    expect(result.backupPath).toBeDefined();
+    expect(lstatSync(result.backupPath!).isSymbolicLink()).toBe(true);
+    expect(realpathSync(result.backupPath!)).toBe(realpathSync(otherDir));
+    expect(realpathSync(registrationDir)).toBe(realpathSync(join(home, "skills", "agent-handoff")));
+  });
+
+  test("installSkill is idempotent after registration is already correct", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const skillsHome = join(tmp, "skills");
+
+    const first = installSkill({ home, skillsHome });
+    const second = installSkill({ home, skillsHome });
+
+    expect(first.updated).toBe(true);
+    expect(second.updated).toBe(false);
+    expect(second.backupPath).toBeUndefined();
   });
 });
 

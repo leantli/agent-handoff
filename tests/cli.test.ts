@@ -1,5 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -215,11 +224,12 @@ describe("cli", () => {
     expect(skill).not.toContain("Do not use `learn` for temporary task state; use `checkpoint` instead.");
   });
 
-  test("docs explain the Codex and Claude Code skill install locations", () => {
+  test("docs explain the canonical skill and registered Codex and Claude Code locations", () => {
     const readme = normalizeWhitespace(readFileSync(join(process.cwd(), "README.md"), "utf8"));
 
+    expect(readme).toContain("under `~/.agent-handoff/skills/agent-handoff`");
     expect(readme).toContain("for Codex under `~/.agents/skills/agent-handoff`");
-    expect(readme).toContain("for Claude Code under `~/.claude/skills/agent-handoff`");
+    expect(readme).toContain("Claude Code under `~/.claude/skills/agent-handoff`");
     expect(readme).not.toContain("installs the packaged skill under `~/.agents/skills/agent-handoff`");
   });
 
@@ -257,8 +267,16 @@ describe("cli", () => {
     expect(result.stdout).toContain("Agent handoff enabled");
     expect(result.stdout).toContain(join(skillsHome, "agent-handoff", "SKILL.md"));
     expect(result.stdout).toContain(join(claudeSkillsHome, "agent-handoff", "SKILL.md"));
+    const canonicalSkill = join(home, "skills", "agent-handoff");
+    expect(existsSync(join(canonicalSkill, "SKILL.md"))).toBe(true);
     expect(existsSync(join(skillsHome, "agent-handoff", "SKILL.md"))).toBe(true);
     expect(existsSync(join(claudeSkillsHome, "agent-handoff", "SKILL.md"))).toBe(true);
+    if (process.platform !== "win32") {
+      expect(lstatSync(join(skillsHome, "agent-handoff")).isSymbolicLink()).toBe(true);
+      expect(lstatSync(join(claudeSkillsHome, "agent-handoff")).isSymbolicLink()).toBe(true);
+      expect(realpathSync(join(skillsHome, "agent-handoff"))).toBe(realpathSync(canonicalSkill));
+      expect(realpathSync(join(claudeSkillsHome, "agent-handoff"))).toBe(realpathSync(canonicalSkill));
+    }
 
     writeFileSync(bootstrapPath, "version: 2\nproject_id: github.com__owner__repo\n");
     writeFileSync(join(repo, "AGENTS.md"), "# Existing\n");
@@ -290,6 +308,24 @@ describe("cli", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("# Agent Handoff Start Packet");
     expect(result.stdout).toContain("Ready for another device.");
+  });
+
+  test("enable reports when an existing skill registration is backed up", () => {
+    const tmp = tempDir();
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    const skillsHome = join(tmp, "skills");
+    const registrationDir = join(skillsHome, "agent-handoff");
+    mkdirSync(repo);
+    mkdirSync(registrationDir, { recursive: true });
+    writeFileSync(join(registrationDir, "SKILL.md"), "---\nname: custom-agent-handoff\n---\n");
+
+    const result = runCli(repo, "--home", home, "enable", "--skills-home", skillsHome);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("backed up previous registration:");
+    expect(result.stdout).toContain("agent-handoff.bak-");
+    expect(readFileSync(join(registrationDir, "SKILL.md"), "utf8")).toContain("agent-handoff start");
   });
 
   test("learn writes global memory", () => {
