@@ -1,15 +1,18 @@
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { dirname, join, resolve } from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import {
   HandoffError,
@@ -26,6 +29,8 @@ import {
 } from "../src/core.js";
 
 const temps: string[] = [];
+let oldHome: string | undefined;
+let oldUserProfile: string | undefined;
 
 function tempDir(): string {
   const path = mkdtempSync(join(tmpdir(), "agent-handoff-test-"));
@@ -33,7 +38,69 @@ function tempDir(): string {
   return path;
 }
 
+function withHome<T>(home: string, run: () => T): T {
+  const oldHome = process.env.HOME;
+  const oldUserProfile = process.env.USERPROFILE;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  try {
+    return run();
+  } finally {
+    if (oldHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = oldHome;
+    }
+    if (oldUserProfile === undefined) {
+      delete process.env.USERPROFILE;
+    } else {
+      process.env.USERPROFILE = oldUserProfile;
+    }
+  }
+}
+
+function execGit(args: string[], options: { cwd?: string; encoding?: BufferEncoding } = {}): string {
+  return execFileSync("git", args, {
+    cwd: options.cwd,
+    encoding: options.encoding ?? "utf8",
+    env: {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+      GIT_CONFIG_SYSTEM: process.platform === "win32" ? "NUL" : "/dev/null",
+      GIT_TERMINAL_PROMPT: "0",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+function expectRegisteredSkill(registrationDir: string, canonicalDir: string): void {
+  expect(existsSync(join(registrationDir, "SKILL.md"))).toBe(true);
+  expect(readFileSync(join(registrationDir, "SKILL.md"), "utf8")).toContain("agent-handoff start");
+  if (process.platform !== "win32") {
+    expect(lstatSync(registrationDir).isSymbolicLink()).toBe(true);
+    expect(realpathSync(registrationDir)).toBe(realpathSync(canonicalDir));
+  }
+}
+
+beforeEach(() => {
+  oldHome = process.env.HOME;
+  oldUserProfile = process.env.USERPROFILE;
+  const fakeUserHome = tempDir();
+  process.env.HOME = fakeUserHome;
+  process.env.USERPROFILE = fakeUserHome;
+});
+
 afterEach(() => {
+  if (oldHome === undefined) {
+    delete process.env.HOME;
+  } else {
+    process.env.HOME = oldHome;
+  }
+  if (oldUserProfile === undefined) {
+    delete process.env.USERPROFILE;
+  } else {
+    process.env.USERPROFILE = oldUserProfile;
+  }
   for (const path of temps.splice(0)) {
     rmSync(path, { recursive: true, force: true });
   }
@@ -57,12 +124,23 @@ describe("vault setup", () => {
     expect(config.vault).toBe(resolve(home, "vault"));
   });
 
+  test("setupHome default home follows the current HOME at call time", () => {
+    const fakeUserHome = join(tempDir(), "user-home");
+
+    withHome(fakeUserHome, () => {
+      const result = setupHome();
+
+      expect(result.home).toBe(resolve(fakeUserHome, ".agent-handoff"));
+      expect(existsSync(join(fakeUserHome, ".agent-handoff", "config.json"))).toBe(true);
+    });
+  });
+
   test("setupHome with an existing sync remote clones remote vault", () => {
     const tmp = tempDir();
     const bare = join(tmp, "vault.git");
     const homeA = join(tmp, "home-a");
     const homeB = join(tmp, "home-b");
-    execFileSync("git", ["init", "--bare", bare]);
+    execGit(["init", "--bare", bare]);
 
     setupHome({ home: homeA, syncUrl: bare });
     learn("A device learned this.", { home: homeA, kind: "lesson" });
@@ -78,7 +156,7 @@ describe("vault setup", () => {
     const tmp = tempDir();
     const bare = join(tmp, "vault.git");
     const home = join(tmp, "home");
-    execFileSync("git", ["init", "--bare", bare]);
+    execGit(["init", "--bare", bare]);
 
     setupHome({ home, syncUrl: bare });
     learn("First sync should be quiet about missing remote refs.", { home, kind: "lesson" });
@@ -94,7 +172,7 @@ describe("vault setup", () => {
     const bare = join(tmp, "vault.git");
     const homeA = join(tmp, "home-a");
     const homeB = join(tmp, "home-b");
-    execFileSync("git", ["init", "--bare", bare]);
+    execGit(["init", "--bare", bare]);
 
     setupHome({ home: homeA, syncUrl: bare });
     learn("Base memory.", { home: homeA, kind: "lesson" });
@@ -116,7 +194,7 @@ describe("vault setup", () => {
     const homeA = join(tmp, "home-a");
     const homeB = join(tmp, "home-b");
     const vaultB = join(homeB, "vault");
-    execFileSync("git", ["init", "--bare", bare]);
+    execGit(["init", "--bare", bare]);
 
     setupHome({ home: homeA, syncUrl: bare });
     learn("Base memory.", { home: homeA, kind: "lesson" });
@@ -136,7 +214,7 @@ describe("vault setup", () => {
       .replace(/^=======\n/gm, "")
       .replace(/^>>>>>>>.*\n/gm, "");
     writeFileSync(lessons, resolved, "utf8");
-    execFileSync("git", ["add", "global/lessons.md"], { cwd: vaultB });
+    execGit(["add", "global/lessons.md"], { cwd: vaultB });
 
     expect(() => syncVault({ home: homeB })).toThrow(message);
   });
@@ -146,7 +224,7 @@ describe("vault setup", () => {
     const bare = join(tmp, "vault.git");
     const homeA = join(tmp, "home-a");
     const homeB = join(tmp, "home-b");
-    execFileSync("git", ["init", "--bare", bare]);
+    execGit(["init", "--bare", bare]);
 
     enableHandoff({ home: homeA, skillsHome: join(tmp, "skills-a") });
     learn("Remote memory should survive device setup order.", { home: homeA, kind: "lesson" });
@@ -164,7 +242,7 @@ describe("vault setup", () => {
     const tmp = tempDir();
     const bare = join(tmp, "vault.git");
     const home = join(tmp, "home");
-    execFileSync("git", ["init", "--bare", bare]);
+    execGit(["init", "--bare", bare]);
 
     enableHandoff({ home, skillsHome: join(tmp, "skills") });
     expect(getStatus({ home }).syncConfigured).toBe(false);
@@ -186,27 +264,158 @@ describe("vault setup", () => {
     );
   });
 
-  test("installSkill writes user skill", () => {
-    const tmp = tempDir();
-    const skillsHome = join(tmp, "skills");
-
-    const result = installSkill({ skillsHome });
-
-    expect(existsSync(result.path)).toBe(true);
-    expect(readFileSync(result.path, "utf8")).toContain("agent-handoff start");
-    expect(result.path).toBe(resolve(skillsHome, "agent-handoff", "SKILL.md"));
-  });
-
-  test("enableHandoff creates local memory and installs the user skill", () => {
+  test("installSkill writes the canonical skill and registers a user skill symlink", () => {
     const tmp = tempDir();
     const home = join(tmp, "home");
     const skillsHome = join(tmp, "skills");
 
-    const result = enableHandoff({ home, skillsHome });
+    const result = installSkill({ home, skillsHome });
+
+    const canonicalDir = join(home, "skills", "agent-handoff");
+    const registrationDir = join(skillsHome, "agent-handoff");
+    expect(existsSync(join(canonicalDir, "SKILL.md"))).toBe(true);
+    expectRegisteredSkill(registrationDir, canonicalDir);
+    expect(existsSync(result.path)).toBe(true);
+    expect(readFileSync(result.path, "utf8")).toContain("agent-handoff start");
+    expect(result.path).toBe(resolve(registrationDir, "SKILL.md"));
+  });
+
+  test("enableHandoff creates local memory and registers Codex and Claude Code skills to the same canonical skill", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const skillsHome = join(tmp, "skills");
+    const claudeSkillsHome = join(tmp, "claude-skills");
+
+    const result = enableHandoff({ home, skillsHome, claudeSkillsHome });
 
     expect(result.setup.home).toBe(resolve(home));
     expect(existsSync(join(home, "vault", "global", "preferences.md"))).toBe(true);
-    expect(existsSync(join(skillsHome, "agent-handoff", "SKILL.md"))).toBe(true);
+    const canonicalDir = join(home, "skills", "agent-handoff");
+    expectRegisteredSkill(join(skillsHome, "agent-handoff"), canonicalDir);
+    expectRegisteredSkill(join(claudeSkillsHome, "agent-handoff"), canonicalDir);
+    expect(result.skills.map((skill) => skill.path)).toEqual([
+      resolve(skillsHome, "agent-handoff", "SKILL.md"),
+      resolve(claudeSkillsHome, "agent-handoff", "SKILL.md"),
+    ]);
+  });
+
+  test("enableHandoff still installs the default Claude Code skill when only Codex skills home is overridden", () => {
+    const tmp = tempDir();
+    const fakeUserHome = join(tmp, "user-home");
+    const home = join(tmp, "home");
+    const skillsHome = join(tmp, "codex-skills");
+
+    withHome(fakeUserHome, () => {
+      const result = enableHandoff({ home, skillsHome });
+
+      const claudeSkill = resolve(fakeUserHome, ".claude", "skills", "agent-handoff", "SKILL.md");
+      expect(existsSync(join(skillsHome, "agent-handoff", "SKILL.md"))).toBe(true);
+      expect(existsSync(claudeSkill)).toBe(true);
+      expect(result.skills.map((skill) => skill.path)).toContain(claudeSkill);
+    });
+  });
+
+  test("enableHandoff defaults Codex registration to the official ~/.agents skill root", () => {
+    const tmp = tempDir();
+    const fakeUserHome = join(tmp, "user-home");
+    const home = join(tmp, "home");
+
+    withHome(fakeUserHome, () => {
+      const result = enableHandoff({ home });
+
+      const codexSkill = resolve(fakeUserHome, ".agents", "skills", "agent-handoff", "SKILL.md");
+      const legacyCodexSkill = resolve(fakeUserHome, ".codex", "skills", "agent-handoff", "SKILL.md");
+      expect(result.skills.map((skill) => skill.path)).toContain(codexSkill);
+      expect(existsSync(codexSkill)).toBe(true);
+      expect(existsSync(legacyCodexSkill)).toBe(false);
+    });
+  });
+
+  test("installSkill backs up an existing user skill directory before registering", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const skillsHome = join(tmp, "skills");
+    const registrationDir = join(skillsHome, "agent-handoff");
+    mkdirSync(registrationDir, { recursive: true });
+    writeFileSync(join(registrationDir, "SKILL.md"), "---\nname: my-custom\n---\n# user skill\n");
+    writeFileSync(join(registrationDir, "extra.md"), "user content");
+
+    const result = installSkill({ home, skillsHome });
+
+    expect(result.backupPath).toBeDefined();
+    expect(readFileSync(join(result.backupPath!, "SKILL.md"), "utf8")).toContain("my-custom");
+    expect(readFileSync(join(result.backupPath!, "extra.md"), "utf8")).toBe("user content");
+    expect(readFileSync(result.path, "utf8")).toContain("agent-handoff start");
+    if (process.platform !== "win32") {
+      expect(lstatSync(registrationDir).isSymbolicLink()).toBe(true);
+    }
+  });
+
+  test("installSkill backs up a previous plain-directory install before migrating to symlink", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const skillsHome = join(tmp, "skills");
+    const registrationDir = join(skillsHome, "agent-handoff");
+    mkdirSync(registrationDir, { recursive: true });
+    writeFileSync(join(registrationDir, "SKILL.md"), "---\nname: agent-handoff\n---\n# old version\n");
+
+    const result = installSkill({ home, skillsHome });
+
+    expect(result.backupPath).toBeDefined();
+    expect(readFileSync(join(result.backupPath!, "SKILL.md"), "utf8")).toContain("# old version");
+    expect(readFileSync(result.path, "utf8")).toContain("agent-handoff start");
+  });
+
+  test("installSkill does not trust a managed-copy marker from another canonical path", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const skillsHome = join(tmp, "skills");
+    const registrationDir = join(skillsHome, "agent-handoff");
+    mkdirSync(registrationDir, { recursive: true });
+    writeFileSync(join(registrationDir, "SKILL.md"), "---\nname: custom-agent-handoff\n---\n# custom\n");
+    writeFileSync(
+      join(registrationDir, ".agent-handoff-managed.json"),
+      JSON.stringify({ managed_by: "agent-handoff", canonical_path: join(tmp, "other-home", "skills", "agent-handoff") }),
+    );
+
+    const result = installSkill({ home, skillsHome });
+
+    expect(result.backupPath).toBeDefined();
+    expect(readFileSync(join(result.backupPath!, "SKILL.md"), "utf8")).toContain("# custom");
+    expect(readFileSync(result.path, "utf8")).toContain("agent-handoff start");
+  });
+
+  test("installSkill backs up a wrong symlink before registering the canonical skill", () => {
+    if (process.platform === "win32") return;
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const skillsHome = join(tmp, "skills");
+    const registrationDir = join(skillsHome, "agent-handoff");
+    const otherDir = join(tmp, "other-skill");
+    mkdirSync(dirname(registrationDir), { recursive: true });
+    mkdirSync(otherDir, { recursive: true });
+    writeFileSync(join(otherDir, "SKILL.md"), "---\nname: other\n---\n");
+    symlinkSync(otherDir, registrationDir, "dir");
+
+    const result = installSkill({ home, skillsHome });
+
+    expect(result.backupPath).toBeDefined();
+    expect(lstatSync(result.backupPath!).isSymbolicLink()).toBe(true);
+    expect(realpathSync(result.backupPath!)).toBe(realpathSync(otherDir));
+    expect(realpathSync(registrationDir)).toBe(realpathSync(join(home, "skills", "agent-handoff")));
+  });
+
+  test("installSkill is idempotent after registration is already correct", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const skillsHome = join(tmp, "skills");
+
+    const first = installSkill({ home, skillsHome });
+    const second = installSkill({ home, skillsHome });
+
+    expect(first.updated).toBe(true);
+    expect(second.updated).toBe(false);
+    expect(second.backupPath).toBeUndefined();
   });
 });
 
@@ -216,8 +425,8 @@ describe("project identity", () => {
     const root = join(tmp, "repo");
     const home = join(tmp, "home");
     mkdirSync(root);
-    execFileSync("git", ["init"], { cwd: root });
-    execFileSync("git", ["remote", "add", "origin", "git@github.com:leantli/agent-handoff.git"], {
+    execGit(["init"], { cwd: root });
+    execGit(["remote", "add", "origin", "git@github.com:leantli/agent-handoff.git"], {
       cwd: root,
     });
     writeFileSync(join(root, "AGENTS.md"), "# Existing Instructions\n\nDo not overwrite this.\n");
@@ -258,6 +467,20 @@ describe("project identity", () => {
     expect(existsSync(join(home, "vault", "projects", "github.com__owner__repo", "project.md"))).toBe(
       true,
     );
+  });
+
+  test("bootstrap inline comments do not become part of the project id", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const root = join(tmp, "repo");
+    mkdirSync(root);
+    enableHandoff({ home, skillsHome: join(tmp, "skills"), claudeSkillsHome: join(tmp, "claude-skills") });
+    writeFileSync(join(root, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo # local alias\n");
+
+    const packet = buildStartPacket({ root, home });
+
+    expect(packet).toContain("Project: `github.com__owner__repo`");
+    expect(packet).not.toContain("github.com__owner__repo__local_alias");
   });
 });
 
@@ -409,11 +632,91 @@ describe("start, checkpoint, and learn", () => {
     expect(readFileSync(branch.path, "utf8")).toContain("v0.3");
   });
 
+  test("branch scoped memory does not collide for branch names with the same sanitized form", () => {
+    const tmp = tempDir();
+    const root = join(tmp, "repo");
+    const home = join(tmp, "home");
+    mkdirSync(root);
+    enableHandoff({ home, skillsHome: join(tmp, "skills"), claudeSkillsHome: join(tmp, "claude-skills") });
+    writeFileSync(join(root, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo\n");
+
+    const slashBranch = learn("Slash branch context.", {
+      home,
+      root,
+      scope: "branch",
+      kind: "context",
+      branch: "feature/foo",
+    });
+    const underscoreBranch = learn("Underscore branch context.", {
+      home,
+      root,
+      scope: "branch",
+      kind: "context",
+      branch: "feature__foo",
+    });
+
+    expect(slashBranch.path).not.toBe(underscoreBranch.path);
+    expect(readFileSync(slashBranch.path, "utf8")).toContain("Slash branch context.");
+    expect(readFileSync(slashBranch.path, "utf8")).not.toContain("Underscore branch context.");
+    expect(readFileSync(underscoreBranch.path, "utf8")).toContain("Underscore branch context.");
+  });
+
+  test("branch scoped memory reuses legacy branch files when their header matches the branch", () => {
+    const tmp = tempDir();
+    const root = join(tmp, "repo");
+    const home = join(tmp, "home");
+    mkdirSync(root);
+    enableHandoff({ home, skillsHome: join(tmp, "skills"), claudeSkillsHome: join(tmp, "claude-skills") });
+    writeFileSync(join(root, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo\n");
+    buildStartPacket({ root, home, branch: "main" });
+    const project = join(home, "vault", "projects", "github.com__owner__repo");
+    const legacyBranchFile = join(project, "branches", "feature__foo.md");
+    writeFileSync(legacyBranchFile, "# Branch Context: feature/foo\n\nLegacy context.\n");
+
+    const packet = buildStartPacket({ root, home, branch: "feature/foo" });
+    const learned = learn("Append to legacy file.", {
+      home,
+      root,
+      scope: "branch",
+      kind: "context",
+      branch: "feature/foo",
+    });
+
+    expect(packet).toContain("Legacy context.");
+    expect(learned.path).toBe(legacyBranchFile);
+    expect(readFileSync(legacyBranchFile, "utf8")).toContain("Append to legacy file.");
+  });
+
+  test("branch scoped memory avoids legacy branch files when their header belongs to another branch", () => {
+    const tmp = tempDir();
+    const root = join(tmp, "repo");
+    const home = join(tmp, "home");
+    mkdirSync(root);
+    enableHandoff({ home, skillsHome: join(tmp, "skills"), claudeSkillsHome: join(tmp, "claude-skills") });
+    writeFileSync(join(root, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo\n");
+    buildStartPacket({ root, home, branch: "main" });
+    const project = join(home, "vault", "projects", "github.com__owner__repo");
+    const legacyBranchFile = join(project, "branches", "feature__foo.md");
+    writeFileSync(legacyBranchFile, "# Branch Context: feature/foo\n\nLegacy slash context.\n");
+
+    const learned = learn("Underscore branch context.", {
+      home,
+      root,
+      scope: "branch",
+      kind: "context",
+      branch: "feature__foo",
+    });
+
+    expect(learned.path).not.toBe(legacyBranchFile);
+    expect(readFileSync(legacyBranchFile, "utf8")).not.toContain("Underscore branch context.");
+    expect(readFileSync(learned.path, "utf8")).toContain("Underscore branch context.");
+  });
+
   test("enableSync configures cross-device sync separately from local enable", () => {
     const tmp = tempDir();
     const bare = join(tmp, "vault.git");
     const home = join(tmp, "home");
-    execFileSync("git", ["init", "--bare", bare]);
+    execGit(["init", "--bare", bare]);
 
     const result = enableSync({ home, syncUrl: bare });
 
@@ -429,6 +732,26 @@ describe("start, checkpoint, and learn", () => {
     const missing = join(tmp, "missing.git");
 
     expect(() => enableSync({ home, syncUrl: missing })).toThrow(HandoffError);
+    expect(existsSync(join(home, "config.json"))).toBe(false);
+  });
+
+  test("enableSync rejects option-like sync URLs before running git", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+
+    expect(() => enableSync({ home, syncUrl: "--upload-pack=/tmp/not-git" })).toThrow(
+      "sync remote URL must not start with '-'",
+    );
+    expect(existsSync(join(home, "config.json"))).toBe(false);
+  });
+
+  test("enableSync rejects git remote-helper URLs before running git", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+
+    expect(() => enableSync({ home, syncUrl: "foo::bar" })).toThrow(
+      "sync remote URL uses an unsupported git remote-helper syntax",
+    );
     expect(existsSync(join(home, "config.json"))).toBe(false);
   });
 
@@ -492,12 +815,51 @@ describe("start, checkpoint, and learn", () => {
     expect(status.problems.join("\n")).toContain(`run agent-handoff sync init ${join(tmp, "vault.git")}`);
   });
 
+  test("status redacts credentials from sync URLs in problem messages", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const vault = join(home, "vault");
+    mkdirSync(vault, { recursive: true });
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({
+        version: 2,
+        vault,
+        sync_url: "https://user:secret-token@example.com/owner/vault.git",
+      }),
+    );
+
+    const status = getStatus({ home });
+    const message = status.problems.join("\n");
+
+    expect(message).toContain("https://<redacted>@example.com/owner/vault.git");
+    expect(message).not.toContain("secret-token");
+    expect(message).not.toContain("user:secret-token");
+  });
+
+  test("sync errors redact credential-bearing sync URLs", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    const vault = join(home, "vault");
+    const expected = "https://x-access-token:ghp_expected@github.com/owner/expected.git";
+    const actual = "https://x-access-token:ghp_actual@github.com/owner/actual.git";
+    mkdirSync(vault, { recursive: true });
+    execGit(["init"], { cwd: vault });
+    execGit(["remote", "add", "origin", actual], { cwd: vault });
+    writeFileSync(join(home, "config.json"), JSON.stringify({ version: 2, vault, sync_url: expected }));
+
+    expect(() => syncVault({ home })).toThrow("https://<redacted>@github.com/owner/expected.git");
+    expect(() => syncVault({ home })).toThrow("https://<redacted>@github.com/owner/actual.git");
+    expect(() => syncVault({ home })).not.toThrow("ghp_expected");
+    expect(() => syncVault({ home })).not.toThrow("ghp_actual");
+  });
+
   test("status reports sync misconfigured when vault origin is missing", () => {
     const tmp = tempDir();
     const home = join(tmp, "home");
     const vault = join(home, "vault");
     mkdirSync(vault, { recursive: true });
-    execFileSync("git", ["init"], { cwd: vault });
+    execGit(["init"], { cwd: vault });
     writeFileSync(join(home, "config.json"), JSON.stringify({ version: 2, vault, sync_url: join(tmp, "vault.git") }));
 
     const status = getStatus({ home });
@@ -515,8 +877,8 @@ describe("start, checkpoint, and learn", () => {
     const expected = join(tmp, "expected.git");
     const actual = join(tmp, "actual.git");
     mkdirSync(vault, { recursive: true });
-    execFileSync("git", ["init"], { cwd: vault });
-    execFileSync("git", ["remote", "add", "origin", actual], { cwd: vault });
+    execGit(["init"], { cwd: vault });
+    execGit(["remote", "add", "origin", actual], { cwd: vault });
     writeFileSync(join(home, "config.json"), JSON.stringify({ version: 2, vault, sync_url: expected }));
 
     const status = getStatus({ home });
@@ -535,15 +897,15 @@ describe("start, checkpoint, and learn", () => {
     const expected = join(tmp, "expected.git");
     const actual = join(tmp, "actual.git");
     mkdirSync(vault, { recursive: true });
-    execFileSync("git", ["init", "--bare", expected]);
-    execFileSync("git", ["init", "--bare", actual]);
-    execFileSync("git", ["init"], { cwd: vault });
-    execFileSync("git", ["remote", "add", "origin", actual], { cwd: vault });
+    execGit(["init", "--bare", expected]);
+    execGit(["init", "--bare", actual]);
+    execGit(["init"], { cwd: vault });
+    execGit(["remote", "add", "origin", actual], { cwd: vault });
     writeFileSync(join(vault, "note.md"), "unsynced memory\n");
     writeFileSync(join(home, "config.json"), JSON.stringify({ version: 2, vault, sync_url: expected }));
 
     expect(() => syncVault({ home })).toThrow("sync is configured for");
-    expect(execFileSync("git", ["ls-remote", "--heads", actual], { encoding: "utf8" })).toBe("");
+    expect(execGit(["ls-remote", "--heads", actual], { encoding: "utf8" })).toBe("");
   });
 
   test("syncVault rejects a git vault when sync_url is not configured", () => {
@@ -552,14 +914,14 @@ describe("start, checkpoint, and learn", () => {
     const vault = join(home, "vault");
     const remote = join(tmp, "vault.git");
     mkdirSync(vault, { recursive: true });
-    execFileSync("git", ["init", "--bare", remote]);
-    execFileSync("git", ["init"], { cwd: vault });
-    execFileSync("git", ["remote", "add", "origin", remote], { cwd: vault });
+    execGit(["init", "--bare", remote]);
+    execGit(["init"], { cwd: vault });
+    execGit(["remote", "add", "origin", remote], { cwd: vault });
     writeFileSync(join(vault, "note.md"), "unsynced memory\n");
     writeFileSync(join(home, "config.json"), JSON.stringify({ version: 2, vault }));
 
     expect(() => syncVault({ home })).toThrow("sync is not configured");
-    expect(execFileSync("git", ["ls-remote", "--heads", remote], { encoding: "utf8" })).toBe("");
+    expect(execGit(["ls-remote", "--heads", remote], { encoding: "utf8" })).toBe("");
   });
 
   test("start fails with a clear error when config is invalid", () => {
@@ -579,7 +941,7 @@ describe("start, checkpoint, and learn", () => {
     const homeA = join(tmp, "home-a");
     const homeB = join(tmp, "home-b");
     const rootB = join(tmp, "repo-b");
-    execFileSync("git", ["init", "--bare", bare]);
+    execGit(["init", "--bare", bare]);
     mkdirSync(rootB);
 
     enableHandoff({ home: homeA, skillsHome: join(tmp, "skills-a") });
@@ -603,7 +965,7 @@ describe("start, checkpoint, and learn", () => {
     const homeA = join(tmp, "home-a");
     const homeB = join(tmp, "home-b");
     const rootB = join(tmp, "repo-b");
-    execFileSync("git", ["init", "--bare", bare]);
+    execGit(["init", "--bare", bare]);
     mkdirSync(rootB);
 
     enableHandoff({ home: homeA, skillsHome: join(tmp, "skills-a") });
@@ -631,8 +993,8 @@ describe("start, checkpoint, and learn", () => {
     const secondRemote = join(tmp, "second.git");
     const homeA = join(tmp, "home-a");
     const homeB = join(tmp, "home-b");
-    execFileSync("git", ["init", "--bare", firstRemote]);
-    execFileSync("git", ["init", "--bare", secondRemote]);
+    execGit(["init", "--bare", firstRemote]);
+    execGit(["init", "--bare", secondRemote]);
 
     enableHandoff({ home: homeA, skillsHome: join(tmp, "skills-a") });
     learn("First remote memory.", { home: homeA, kind: "lesson" });
@@ -689,5 +1051,9 @@ describe("start, checkpoint, and learn", () => {
     expect(second.path).not.toBe(first.path);
     expect(readFileSync(first.path, "utf8")).toContain("First checkpoint.");
     expect(readFileSync(second.path, "utf8")).toContain("Second checkpoint.");
+  });
+
+  test("normalizeProjectId turns malformed URLs into HandoffError", () => {
+    expect(() => normalizeProjectId("https://[bad-url")).toThrow(HandoffError);
   });
 });

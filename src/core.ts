@@ -1,17 +1,24 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
+  appendFileSync,
+  cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  renameSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { hostname, homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const DEFAULT_HOME = join(homedir(), ".agent-handoff");
+export const DEFAULT_HOME = join(userHome(), ".agent-handoff");
 export const CONFIG_FILE = "config.json";
 export const BOOTSTRAP_FILE = ".agent-handoff.yml";
 
@@ -21,6 +28,7 @@ const SECRET_PATTERNS = [
   /\bsk-[A-Za-z0-9_-]{8,}\b/,
 ];
 const GIT_TIMEOUT_MS = 30_000;
+const MANAGED_SKILL_MARKER = ".agent-handoff-managed.json";
 
 type LearnScope = "global" | "project" | "branch";
 type LearnKind = "preference" | "lesson" | "decision" | "context";
@@ -41,7 +49,9 @@ export interface SetupResult {
 
 export interface EnableResult {
   setup: SetupResult;
+  /** @deprecated Use skills instead. */
   skill: InstallSkillResult;
+  skills: InstallSkillResult[];
 }
 
 export interface CheckpointResult {
@@ -59,6 +69,9 @@ export interface LearnResult {
 
 export interface InstallSkillResult {
   path: string;
+  canonicalPath: string;
+  registration: "symlink" | "copy";
+  backupPath?: string;
   updated: boolean;
 }
 
@@ -84,6 +97,7 @@ export function setupHome(opts: {
 } = {}): SetupResult {
   const homePath = resolveHome(opts.home);
   const vaultPath = opts.vault ? resolve(opts.vault) : join(homePath, "vault");
+  const syncUrl = opts.syncUrl?.trim();
   let created = 0;
   let updated = 0;
 
@@ -92,17 +106,18 @@ export function setupHome(opts: {
     created += 1;
   }
 
-  if (opts.syncUrl) {
-    validateSyncRemote(homePath, opts.syncUrl);
-    if (hasUnsyncedLocalVault(vaultPath) && remoteHasRefs(homePath, opts.syncUrl)) {
+  if (syncUrl !== undefined) {
+    validateSyncUrl(syncUrl);
+    validateSyncRemote(homePath, syncUrl);
+    if (hasUnsyncedLocalVault(vaultPath) && remoteHasRefs(homePath, syncUrl)) {
       throw new HandoffError(
         "local vault has unsynced memory and the sync remote already has data; move or back up the local vault before joining this remote",
       );
     }
-    ensureExistingGitVaultCompatible(vaultPath, opts.syncUrl);
+    ensureExistingGitVaultCompatible(vaultPath, syncUrl);
   }
 
-  if (opts.syncUrl && cloneVaultIfNeeded(homePath, vaultPath, opts.syncUrl)) {
+  if (syncUrl && cloneVaultIfNeeded(homePath, vaultPath, syncUrl)) {
     created += 1;
   }
 
@@ -116,18 +131,22 @@ export function setupHome(opts: {
   for (const [filename, contents] of Object.entries(globalSeedFiles())) {
     const path = join(vaultPath, "global", filename);
     if (!existsSync(path)) {
-      writeFileSync(path, contents, "utf8");
+      writeTextFile(path, contents);
       created += 1;
     }
   }
 
   const configPath = join(homePath, CONFIG_FILE);
   const desired: Config = { version: 2, vault: vaultPath };
-  if (opts.syncUrl) desired.sync_url = opts.syncUrl;
+  if (syncUrl) desired.sync_url = syncUrl;
+  const existing = existsSync(configPath) ? readConfig(opts.home) : null;
+  if (existsSync(configPath) && !existing) throw new HandoffError(`${CONFIG_FILE} is missing`);
 
-  if (existsSync(configPath)) {
-    const existing = readConfig(opts.home);
-    if (!existing) throw new HandoffError(`${CONFIG_FILE} is missing`);
+  if (syncUrl) {
+    ensureGitRemote(vaultPath, syncUrl);
+  }
+
+  if (existing) {
     let changed = false;
     if (existing.version !== 2) {
       existing.version = 2;
@@ -137,21 +156,17 @@ export function setupHome(opts: {
       existing.vault = vaultPath;
       changed = true;
     }
-    if (opts.syncUrl && existing.sync_url !== opts.syncUrl) {
-      existing.sync_url = opts.syncUrl;
+    if (syncUrl && existing.sync_url !== syncUrl) {
+      existing.sync_url = syncUrl;
       changed = true;
     }
     if (changed) {
-      writeFileSync(configPath, json(existing), "utf8");
+      writeTextFile(configPath, json(existing));
       updated += 1;
     }
   } else {
-    writeFileSync(configPath, json(desired), "utf8");
+    writeTextFile(configPath, json(desired));
     created += 1;
-  }
-
-  if (opts.syncUrl) {
-    ensureGitRemote(vaultPath, opts.syncUrl);
   }
 
   return { home: homePath, vault: vaultPath, created, updated };
@@ -167,7 +182,12 @@ export function normalizeProjectId(value: string): string {
     host = userHost.split("@", 2)[1] ?? "";
     path = remotePath;
   } else if (raw.includes("://")) {
-    const parsed = new URL(raw);
+    let parsed: URL;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      throw new HandoffError(`invalid project id URL: ${raw}`);
+    }
     host = parsed.hostname || parsed.host;
     path = parsed.pathname;
   } else {
@@ -181,29 +201,63 @@ export function normalizeProjectId(value: string): string {
   return safeProjectId([host.toLowerCase(), ...path.split("/").filter(Boolean)].join("__"));
 }
 
-export function installSkill(opts: { skillsHome?: string } = {}): InstallSkillResult {
+export function installSkill(opts: { home?: string; skillsHome?: string } = {}): InstallSkillResult {
+  const homePath = resolveHome(opts.home);
+  const canonicalDir = join(homePath, "skills", "agent-handoff");
+  const canonicalPath = join(canonicalDir, "SKILL.md");
+  mkdirSync(canonicalDir, { recursive: true });
+  const content = readResource("agent-handoff.SKILL.md");
+  let updated = !existsSync(canonicalPath) || readFileSync(canonicalPath, "utf8") !== content;
+  if (updated) {
+    writeTextFile(canonicalPath, content);
+  }
+
   const skillsHome = opts.skillsHome
     ? resolve(opts.skillsHome)
-    : resolve(join(homedir(), ".agents", "skills"));
-  const skillDir = join(skillsHome, "agent-handoff");
-  mkdirSync(skillDir, { recursive: true });
-  const path = join(skillDir, "SKILL.md");
-  const content = readResource("agent-handoff.SKILL.md");
-  const updated = !existsSync(path) || readFileSync(path, "utf8") !== content;
-  if (updated) {
-    writeFileSync(path, content, "utf8");
+    : resolve(join(userHome(), ".agents", "skills"));
+  const registrationDir = join(skillsHome, "agent-handoff");
+  const registration = registerSkillDirectory(canonicalDir, registrationDir);
+  updated = updated || registration.updated;
+  return {
+    path: join(registrationDir, "SKILL.md"),
+    canonicalPath,
+    registration: registration.kind,
+    backupPath: registration.backupPath,
+    updated,
+  };
+}
+
+function installEnabledSkills(opts: {
+  home?: string;
+  skillsHome?: string;
+  claudeSkillsHome?: string;
+} = {}): InstallSkillResult[] {
+  const primary = installSkill({ home: opts.home, skillsHome: opts.skillsHome });
+  const skills = [primary];
+  const claude = installSkill({
+    home: opts.home,
+    skillsHome: opts.claudeSkillsHome ?? join(userHome(), ".claude", "skills"),
+  });
+  if (claude.path !== primary.path) {
+    skills.push(claude);
   }
-  return { path, updated };
+
+  return skills;
 }
 
 export function enableHandoff(opts: {
   home?: string;
   vault?: string;
   skillsHome?: string;
+  claudeSkillsHome?: string;
 } = {}): EnableResult {
   const setup = setupHome({ home: opts.home, vault: opts.vault });
-  const skill = installSkill({ skillsHome: opts.skillsHome });
-  return { setup, skill };
+  const skills = installEnabledSkills({
+    home: setup.home,
+    skillsHome: opts.skillsHome,
+    claudeSkillsHome: opts.claudeSkillsHome,
+  });
+  return { setup, skill: skills[0], skills };
 }
 
 export function enableSync(opts: {
@@ -212,6 +266,108 @@ export function enableSync(opts: {
   syncUrl: string;
 }): SetupResult {
   return setupHome({ home: opts.home, vault: opts.vault, syncUrl: opts.syncUrl });
+}
+
+function registerSkillDirectory(
+  canonicalDir: string,
+  registrationDir: string,
+): { updated: boolean; kind: "symlink" | "copy"; backupPath?: string } {
+  if (resolve(canonicalDir) === resolve(registrationDir)) {
+    return { updated: false, kind: "copy" };
+  }
+
+  mkdirSync(dirname(registrationDir), { recursive: true });
+  let backupPath: string | undefined;
+
+  if (lexistsSync(registrationDir)) {
+    const stat = lstatSync(registrationDir);
+    if (stat.isSymbolicLink()) {
+      if (sameRealPath(registrationDir, canonicalDir)) {
+        return { updated: false, kind: "symlink" };
+      }
+      backupPath = backupExistingRegistration(registrationDir);
+    } else {
+      if (stat.isDirectory() && isManagedCopyCurrent(registrationDir, canonicalDir)) {
+        return { updated: false, kind: "copy" };
+      }
+      if (stat.isDirectory() && isManagedCopy(registrationDir, canonicalDir)) {
+        copySkillDirectory(canonicalDir, registrationDir);
+        return { updated: true, kind: "copy" };
+      }
+      backupPath = backupExistingRegistration(registrationDir);
+    }
+  }
+
+  try {
+    symlinkSync(canonicalDir, registrationDir, process.platform === "win32" ? "junction" : "dir");
+    return { updated: true, kind: "symlink", backupPath };
+  } catch {
+    copySkillDirectory(canonicalDir, registrationDir);
+    return { updated: true, kind: "copy", backupPath };
+  }
+}
+
+function lexistsSync(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sameRealPath(left: string, right: string): boolean {
+  try {
+    return realpathSync(left) === realpathSync(right);
+  } catch {
+    return false;
+  }
+}
+
+function backupExistingRegistration(path: string): string {
+  const stamp = compactTimestamp(timestamp());
+  let backupPath = join(dirname(path), `${basename(path)}.bak-${stamp}`);
+  let index = 2;
+  while (lexistsSync(backupPath)) {
+    backupPath = join(dirname(path), `${basename(path)}.bak-${stamp}-${index}`);
+    index += 1;
+  }
+  renameSync(path, backupPath);
+  return backupPath;
+}
+
+function isManagedCopyCurrent(registrationDir: string, canonicalDir: string): boolean {
+  return (
+    isManagedCopy(registrationDir, canonicalDir) &&
+    readOptionalFile(join(registrationDir, "SKILL.md")) === readOptionalFile(join(canonicalDir, "SKILL.md"))
+  );
+}
+
+function isManagedCopy(path: string, canonicalDir: string): boolean {
+  const marker = readOptionalFile(join(path, MANAGED_SKILL_MARKER));
+  if (!marker) return false;
+  try {
+    const data = JSON.parse(marker) as { canonical_path?: unknown; managed_by?: unknown };
+    return data.managed_by === "agent-handoff" && data.canonical_path === canonicalDir;
+  } catch {
+    return false;
+  }
+}
+
+function readOptionalFile(path: string): string | null {
+  return existsSync(path) ? readFileSync(path, "utf8") : null;
+}
+
+function copySkillDirectory(canonicalDir: string, registrationDir: string): void {
+  mkdirSync(registrationDir, { recursive: true });
+  cpSync(canonicalDir, registrationDir, { recursive: true, force: true });
+  writeTextFile(
+    join(registrationDir, MANAGED_SKILL_MARKER),
+    json({
+      managed_by: "agent-handoff",
+      canonical_path: canonicalDir,
+    }),
+  );
 }
 
 export function deriveProjectId(root = ".", projectId?: string): string {
@@ -246,7 +402,7 @@ export function buildStartPacket(opts: {
   const branchName = opts.branch ?? currentBranch(rootPath);
   const projectPath = vaultProjectPath(setup.vault, pid);
   ensureProjectFiles(projectPath, branchName);
-  const branchFile = join(projectPath, "branches", `${safeName(branchName)}.md`);
+  const branchFile = branchContextPath(projectPath, branchName);
 
   const sections: Array<[string, string]> = [
     ["Global Preferences", join(setup.vault, "global", "preferences.md")],
@@ -322,7 +478,7 @@ export function writeCheckpoint(opts: {
     cleanedNote,
     "",
   ].join("\n");
-  writeFileSync(path, contents, "utf8");
+  writeTextFile(path, contents);
   return { path, projectId: pid, branch: branchName, createdAt };
 }
 
@@ -386,22 +542,23 @@ export function syncVault(opts: { home?: string } = {}): string[] {
     );
   }
 
-  const branch = gitOutput(setup.vault, ["branch", "--show-current"]) ?? "main";
-  const pull = gitRun(setup.vault, ["pull", "--rebase", "--autostash", "origin", branch]);
-  const ignoredEmptyRemotePull = pull.status !== 0 && isEmptyRemotePull(pull.output);
-  if (pull.status !== 0 && !ignoredEmptyRemotePull) {
-    if (hasActiveGitOperation(setup.vault) || hasUnmergedFiles(setup.vault)) {
-      throw syncConflictError(setup.vault, pull.output);
+  const branch = currentGitBranch(setup.vault);
+  if (remoteHasRefs(setup.vault, config.sync_url)) {
+    const pull = gitRun(setup.vault, ["pull", "--rebase", "--autostash", "origin", branch]);
+    if (pull.status !== 0) {
+      if (hasActiveGitOperation(setup.vault) || hasUnmergedFiles(setup.vault)) {
+        throw syncConflictError(setup.vault, pull.output);
+      }
+      throw new HandoffError(redactGitUrls(pull.output.trim()) || "git pull failed");
     }
-    throw new HandoffError(pull.output.trim() || "git pull failed");
+    if (pull.output.trim()) outputs.push(redactGitUrls(pull.output.trim()));
   }
-  if (!ignoredEmptyRemotePull && pull.output.trim()) outputs.push(pull.output.trim());
 
   const push = gitRun(setup.vault, ["push", "-u", "origin", branch]);
   if (push.status !== 0) {
-    throw new HandoffError(push.output.trim() || "git push failed");
+    throw new HandoffError(redactGitUrls(push.output.trim()) || "git push failed");
   }
-  if (push.output.trim()) outputs.push(push.output.trim());
+  if (push.output.trim()) outputs.push(redactGitUrls(push.output.trim()));
   return outputs;
 }
 
@@ -476,13 +633,13 @@ function ensureProjectFiles(projectPath: string, branch: string): number {
   for (const [filename, contents] of Object.entries(projectSeedFiles())) {
     const path = join(projectPath, filename);
     if (!existsSync(path)) {
-      writeFileSync(path, contents, "utf8");
+      writeTextFile(path, contents);
       created += 1;
     }
   }
-  const branchPath = join(projectPath, "branches", `${safeName(branch)}.md`);
+  const branchPath = branchContextPath(projectPath, branch);
   if (!existsSync(branchPath)) {
-    writeFileSync(branchPath, `# Branch Context: ${branch}\n\n`, "utf8");
+    writeTextFile(branchPath, `# Branch Context: ${branch}\n\n`);
     created += 1;
   }
   return created;
@@ -517,21 +674,29 @@ function learnTargetPath(
   }
 
   const branchName = branch ?? currentBranch(root);
-  const branchPath = join(projectPath, "branches", `${safeName(branchName)}.md`);
+  const branchPath = branchContextPath(projectPath, branchName);
   if (!existsSync(branchPath)) {
-    writeFileSync(branchPath, `# Branch Context: ${branchName}\n\n`, "utf8");
+    writeTextFile(branchPath, `# Branch Context: ${branchName}\n\n`);
   }
   return branchPath;
 }
 
 function resolveHome(home?: string): string {
-  return resolve(home ? expandHome(home) : DEFAULT_HOME);
+  return resolve(home ? expandHome(home) : defaultHome());
 }
 
 function expandHome(path: string): string {
-  if (path === "~") return homedir();
-  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+  if (path === "~") return userHome();
+  if (path.startsWith("~/")) return join(userHome(), path.slice(2));
   return path;
+}
+
+function defaultHome(): string {
+  return join(userHome(), ".agent-handoff");
+}
+
+function userHome(): string {
+  return process.env.HOME || process.env.USERPROFILE || homedir();
 }
 
 function readConfig(home?: string): Config | null {
@@ -574,16 +739,17 @@ function validateConfig(raw: unknown): Config {
 }
 
 function syncConfigProblem(vault: string, syncUrl: string): string | null {
+  const displayUrl = redactGitUrl(syncUrl);
   if (!existsSync(join(vault, ".git"))) {
-    return `sync is configured for ${syncUrl} but vault is not a git repository; run agent-handoff sync init ${syncUrl}`;
+    return `sync is configured for ${displayUrl} but vault is not a git repository; run agent-handoff sync init ${displayUrl}`;
   }
 
   const origin = gitOutput(vault, ["remote", "get-url", "origin"]);
   if (!origin) {
-    return `sync is configured for ${syncUrl} but vault git remote origin is missing; run agent-handoff sync init ${syncUrl}`;
+    return `sync is configured for ${displayUrl} but vault git remote origin is missing; run agent-handoff sync init ${displayUrl}`;
   }
   if (origin !== syncUrl) {
-    return `sync is configured for ${syncUrl} but vault origin is ${origin}; run agent-handoff sync init ${syncUrl}`;
+    return `sync is configured for ${displayUrl} but vault origin is ${redactGitUrl(origin)}; run agent-handoff sync init ${displayUrl}`;
   }
   return null;
 }
@@ -617,14 +783,58 @@ function safeName(value: string): string {
   return normalized || "default";
 }
 
+function branchContextPath(projectPath: string, branch: string): string {
+  const raw = branch.trim();
+  if (!raw) return join(projectPath, "branches", "default.md");
+  const safe = safeName(raw);
+  const branchesDir = join(projectPath, "branches");
+  const legacyPath = join(branchesDir, `${safe}.md`);
+  const hashedPath = join(branchesDir, `${safe}-${shortHash(raw)}.md`);
+  const primaryPath = raw && safe === raw ? legacyPath : hashedPath;
+
+  if (existsSync(legacyPath)) {
+    const legacyBranch = branchContextBranch(legacyPath);
+    if (legacyBranch === branch) return legacyPath;
+    if (primaryPath === legacyPath && legacyBranch && legacyBranch !== branch) {
+      return hashedPath;
+    }
+  }
+
+  return primaryPath;
+}
+
+function shortHash(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 8);
+}
+
+function branchContextBranch(path: string): string | null {
+  const firstLine = readFileSync(path, "utf8").split(/\r?\n/, 1)[0] ?? "";
+  const match = /^# Branch Context:\s*(.+)\s*$/.exec(firstLine);
+  return match?.[1].trim() || null;
+}
+
 function readBootstrap(path: string): Record<string, string> {
   const data: Record<string, string> = {};
-  for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
+  for (const line of readFileSync(path, "utf8").replace(/^\uFEFF/, "").split(/\r?\n/)) {
     if (!line.includes(":") || line.trimStart().startsWith("#")) continue;
     const index = line.indexOf(":");
-    data[line.slice(0, index).trim()] = line.slice(index + 1).trim().replace(/^["']|["']$/g, "");
+    data[line.slice(0, index).trim()] = parseBootstrapScalar(line.slice(index + 1));
   }
   return data;
+}
+
+function parseBootstrapScalar(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  const quote = trimmed[0];
+  if (quote === '"' || quote === "'") {
+    const end = trimmed.indexOf(quote, 1);
+    if (end === -1) {
+      throw new HandoffError(`${BOOTSTRAP_FILE} has an unterminated quoted value`);
+    }
+    return trimmed.slice(1, end);
+  }
+  return trimmed.replace(/\s+#.*$/, "").trim();
 }
 
 function renderSection(title: string, path: string, headingLevel = 2): string[] {
@@ -698,7 +908,7 @@ function json(data: unknown): string {
 }
 
 function appendFile(path: string, contents: string): void {
-  writeFileSync(path, contents, { encoding: "utf8", flag: "a" });
+  appendFileSync(path, contents, { encoding: "utf8", flag: "a" });
 }
 
 function uniquePath(directory: string, filename: string): string {
@@ -715,9 +925,35 @@ function uniquePath(directory: string, filename: string): string {
 }
 
 function validateSyncRemote(home: string, syncUrl: string): void {
-  const result = gitRun(home, ["ls-remote", syncUrl]);
+  const result = gitRun(home, ["ls-remote", "--", syncUrl]);
   if (result.status !== 0) {
-    throw new HandoffError(result.output.trim() || `cannot access sync remote: ${syncUrl}`);
+    throw new HandoffError(redactGitUrls(result.output.trim()) || `cannot access sync remote: ${redactGitUrl(syncUrl)}`);
+  }
+}
+
+function validateSyncUrl(syncUrl: string): void {
+  if (!syncUrl) {
+    throw new HandoffError("sync remote URL cannot be empty");
+  }
+  if (syncUrl.startsWith("-")) {
+    throw new HandoffError("sync remote URL must not start with '-'");
+  }
+  if (/^ext::/i.test(syncUrl)) {
+    throw new HandoffError("sync remote URL uses an unsupported git protocol");
+  }
+  if (/^[A-Za-z][A-Za-z0-9+.-]*::/.test(syncUrl)) {
+    throw new HandoffError("sync remote URL uses an unsupported git remote-helper syntax");
+  }
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(syncUrl)) {
+    let parsed: URL;
+    try {
+      parsed = new URL(syncUrl);
+    } catch {
+      throw new HandoffError(`sync remote URL is invalid: ${redactGitUrl(syncUrl)}`);
+    }
+    if (!["file:", "git:", "http:", "https:", "ssh:"].includes(parsed.protocol)) {
+      throw new HandoffError(`sync remote URL uses an unsupported git protocol: ${parsed.protocol}`);
+    }
   }
 }
 
@@ -726,9 +962,9 @@ function hasUnsyncedLocalVault(vault: string): boolean {
 }
 
 function remoteHasRefs(home: string, syncUrl: string): boolean {
-  const result = gitRun(home, ["ls-remote", "--heads", syncUrl]);
+  const result = gitRun(home, ["ls-remote", "--heads", "--", syncUrl]);
   if (result.status !== 0) {
-    throw new HandoffError(result.output.trim() || `cannot inspect sync remote: ${syncUrl}`);
+    throw new HandoffError(redactGitUrls(result.output.trim()) || `cannot inspect sync remote: ${redactGitUrl(syncUrl)}`);
   }
   return result.output.trim().length > 0;
 }
@@ -741,9 +977,9 @@ function ensureExistingGitVaultCompatible(vault: string, syncUrl: string): void 
   if (!localHead) return;
 
   const namespace = "refs/remotes/agent-handoff-check";
-  const fetch = gitRun(vault, ["fetch", "--no-tags", syncUrl, `+refs/heads/*:${namespace}/*`]);
+  const fetch = gitRun(vault, ["fetch", "--no-tags", "--", syncUrl, `+refs/heads/*:${namespace}/*`]);
   if (fetch.status !== 0) {
-    throw new HandoffError(fetch.output.trim() || `cannot fetch sync remote: ${syncUrl}`);
+    throw new HandoffError(redactGitUrls(fetch.output.trim()) || `cannot fetch sync remote: ${redactGitUrl(syncUrl)}`);
   }
 
   const refs = listRefs(vault, namespace);
@@ -781,9 +1017,9 @@ function cloneVaultIfNeeded(home: string, vault: string, syncUrl: string): boole
       return false;
     }
   }
-  const clone = gitRun(home, ["clone", syncUrl, vault]);
+  const clone = gitRun(home, ["clone", "--", syncUrl, vault]);
   if (clone.status !== 0) {
-    throw new HandoffError(clone.output.trim() || `git clone ${syncUrl} failed`);
+    throw new HandoffError(redactGitUrls(clone.output.trim()) || `git clone ${redactGitUrl(syncUrl)} failed`);
   }
   return clone.status === 0;
 }
@@ -859,9 +1095,9 @@ function gitOutput(root: string, args: string[]): string | null {
 function gitChecked(root: string, args: string[]): string {
   const result = gitRun(root, args);
   if (result.status !== 0) {
-    throw new HandoffError(result.output.trim() || `git ${args.join(" ")} failed`);
+    throw new HandoffError(redactGitUrls(result.output.trim()) || `git ${redactGitUrls(args.join(" "))} failed`);
   }
-  return result.output.trim();
+  return redactGitUrls(result.output.trim());
 }
 
 function gitRun(root: string, args: string[]): { status: number; output: string } {
@@ -872,11 +1108,27 @@ function gitRun(root: string, args: string[]): { status: number; output: string 
     stdio: ["ignore", "pipe", "pipe"],
     timeout: GIT_TIMEOUT_MS,
   });
-  const error = result.error ? `\n${result.error.message}` : "";
+  if (result.error) {
+    const error = result.error as NodeJS.ErrnoException;
+    if (error.code === "ENOENT") {
+      return { status: 127, output: "git is not installed or not on PATH" };
+    }
+    if (error.code === "ETIMEDOUT") {
+      return { status: 124, output: "git command timed out" };
+    }
+    return { status: 1, output: error.message };
+  }
+  if (result.signal) {
+    return { status: 1, output: `git command terminated by signal ${result.signal}` };
+  }
   return {
     status: result.status ?? 1,
-    output: `${result.stdout ?? ""}${result.stderr ?? ""}${error}`,
+    output: `${result.stdout ?? ""}${result.stderr ?? ""}`,
   };
+}
+
+function currentGitBranch(root: string): string {
+  return gitOutput(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]) ?? "main";
 }
 
 function hasUnmergedFiles(vault: string): boolean {
@@ -898,16 +1150,30 @@ function gitPathExists(vault: string, name: string): boolean {
 
 function syncConflictError(vault: string, detail?: string): HandoffError {
   const message = `sync conflict in ${vault}; resolve conflicts in that vault, finish or abort the active git operation, then run agent-handoff sync again`;
-  const trimmed = detail?.trim();
+  const trimmed = redactGitUrls(detail?.trim() ?? "");
   return new HandoffError(trimmed ? `${message}\n\n${trimmed}` : message);
-}
-
-function isEmptyRemotePull(output: string): boolean {
-  const lowered = output.toLowerCase();
-  return lowered.includes("couldn't find remote ref") || lowered.includes("could not find remote ref");
 }
 
 function readResource(name: string): string {
   const path = fileURLToPath(new URL(`../resources/${name}`, import.meta.url));
   return readFileSync(path, "utf8");
+}
+
+function writeTextFile(path: string, contents: string): void {
+  const tmp = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    writeFileSync(tmp, contents, "utf8");
+    renameSync(tmp, path);
+  } catch (error) {
+    rmSync(tmp, { force: true });
+    throw error;
+  }
+}
+
+export function redactGitUrl(value: string): string {
+  return value.replace(/^([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^/@\s]+@)/, "$1<redacted>@");
+}
+
+function redactGitUrls(value: string): string {
+  return value.replace(/[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s)]+/g, (url) => redactGitUrl(url));
 }

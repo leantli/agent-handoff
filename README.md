@@ -27,7 +27,15 @@ agent-handoff enable
 `enable` does two things:
 
 - creates local memory under `~/.agent-handoff`
-- installs the packaged skill under `~/.agents/skills/agent-handoff`
+- stores the packaged skill under `~/.agent-handoff/skills/agent-handoff`
+  and registers it with symlinks for Codex under `~/.agents/skills/agent-handoff`
+  and Claude Code under `~/.claude/skills/agent-handoff`
+  (falling back to managed copies if symlinks are unavailable, such as on some
+  Windows setups or filesystems)
+
+If a skill registration path already exists and is not the expected symlink or a
+managed copy, `enable` backs it up next to the original path before registering
+the packaged skill.
 
 Agents that load user-level skills can then discover when to run
 `agent-handoff start`, `checkpoint`, `learn`, and `sync`. Existing agent

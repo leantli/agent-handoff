@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { fstatSync, readFileSync } from "node:fs";
 import { Command, CommanderError, Option } from "commander";
 
 import {
@@ -8,6 +8,7 @@ import {
   enableSync,
   getStatus,
   learn,
+  redactGitUrl,
   syncVault,
   writeCheckpoint,
 } from "./core.js";
@@ -62,15 +63,26 @@ function buildProgram(
     .description("Enable local handoff memory and install the user skill.")
     .option("--vault <path>", "Vault directory. Defaults to HOME/vault.")
     .option("--skills-home <path>", "Skills home directory. Defaults to ~/.agents/skills.")
-    .action((options: { vault?: string; skillsHome?: string }) => {
+    .option(
+      "--claude-skills-home <path>",
+      "Claude Code skills home directory. Defaults to ~/.claude/skills.",
+    )
+    .action((options: { vault?: string; skillsHome?: string; claudeSkillsHome?: string }) => {
       const result = enableHandoff({
         home: globalHome(program),
         vault: options.vault,
         skillsHome: options.skillsHome,
+        claudeSkillsHome: options.claudeSkillsHome,
       });
       stdout.write(`Agent handoff enabled: ${result.setup.home}\n`);
       stdout.write(`Vault: ${result.setup.vault}\n`);
-      stdout.write(`Skill: ${result.skill.path}\n`);
+      stdout.write("Skills:\n");
+      for (const skill of result.skills) {
+        stdout.write(`- ${skill.path} (${skill.registration})\n`);
+        if (skill.backupPath) {
+          stdout.write(`  backed up previous registration: ${skill.backupPath}\n`);
+        }
+      }
     });
 
   program
@@ -127,7 +139,7 @@ function buildProgram(
     .option("--vault <path>", "Vault directory. Defaults to HOME/vault.")
     .action((gitUrl: string, options: { vault?: string }) => {
       const result = enableSync({ home: globalHome(program), vault: options.vault, syncUrl: gitUrl });
-      stdout.write(`Cross-device sync enabled: ${gitUrl}\n`);
+      stdout.write(`Cross-device sync enabled: ${redactGitUrl(gitUrl)}\n`);
       stdout.write(`Vault: ${result.vault}\n`);
     });
   sync.action(() => {
@@ -144,7 +156,7 @@ function buildProgram(
       if (status.initialized) {
         stdout.write(`Agent handoff is ready for ${status.projectId}.\n`);
         if (status.syncConfigured) {
-          stdout.write(`Sync: configured (${status.syncUrl})\n`);
+          stdout.write(`Sync: configured (${redactGitUrl(status.syncUrl ?? "")})\n`);
         } else {
           stdout.write("Sync: not configured\n");
         }
@@ -170,6 +182,15 @@ function readNote(options: NoteOptions, stdin?: { isTTY?: boolean }): string {
   if (options.note) return options.note;
   if (options.file) return readFileSync(options.file, "utf8");
   if (stdin?.isTTY ?? process.stdin.isTTY) {
+    throw new HandoffError("provide --note or --file, or pipe note text on stdin");
+  }
+  try {
+    const stat = fstatSync(0);
+    if (!stat.isFIFO() && !stat.isFile() && !stat.isSocket()) {
+      throw new HandoffError("provide --note or --file, or pipe note text on stdin");
+    }
+  } catch (error) {
+    if (error instanceof HandoffError) throw error;
     throw new HandoffError("provide --note or --file, or pipe note text on stdin");
   }
   return readFileSync(0, "utf8");

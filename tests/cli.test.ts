@@ -1,5 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -34,11 +43,42 @@ class BufferWriter extends Writable {
   }
 }
 
+function execGit(args: string[], options: { cwd?: string; encoding?: BufferEncoding } = {}): string {
+  return execFileSync("git", args, {
+    cwd: options.cwd,
+    encoding: options.encoding ?? "utf8",
+    env: {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+      GIT_CONFIG_SYSTEM: process.platform === "win32" ? "NUL" : "/dev/null",
+      GIT_TERMINAL_PROMPT: "0",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
 function runCli(repo: string, ...args: string[]): { code: number; stdout: string; stderr: string } {
   const stdout = new BufferWriter();
   const stderr = new BufferWriter();
-  const code = main(args, { cwd: repo, stdout, stderr });
-  return { code, stdout: stdout.text(), stderr: stderr.text() };
+  const oldHome = process.env.HOME;
+  const oldUserProfile = process.env.USERPROFILE;
+  process.env.HOME = join(repo, ".test-user-home");
+  process.env.USERPROFILE = join(repo, ".test-user-home");
+  try {
+    const code = main(args, { cwd: repo, stdout, stderr });
+    return { code, stdout: stdout.text(), stderr: stderr.text() };
+  } finally {
+    if (oldHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = oldHome;
+    }
+    if (oldUserProfile === undefined) {
+      delete process.env.USERPROFILE;
+    } else {
+      process.env.USERPROFILE = oldUserProfile;
+    }
+  }
 }
 
 function normalizeWhitespace(value: string): string {
@@ -53,7 +93,7 @@ function optionalGitLines(args: string[]): string[] | null {
 }
 
 function gitLines(args: string[]): string[] {
-  const output = execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  const output = execGit(args, { encoding: "utf8" }).trim();
   return output ? output.split(/\r?\n/) : [];
 }
 
@@ -89,6 +129,22 @@ describe("cli", () => {
 
     expect(pkg.scripts.prepare).toBe("npm run build");
     expect(pkg.scripts.prepack).toBeUndefined();
+  });
+
+  test("package exposes a library entrypoint and publish guard", () => {
+    const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8"));
+
+    expect(pkg.main).toBe("dist/index.js");
+    expect(pkg.exports).toEqual({
+      ".": {
+        types: "./dist/index.d.ts",
+        import: "./dist/index.js",
+      },
+    });
+    expect(pkg.scripts["smoke:import"]).toContain("import('./dist/index.js')");
+    expect(pkg.scripts.prepublishOnly).toBe(
+      "npm run typecheck && npm test && npm run build && npm run smoke:import",
+    );
   });
 
   test("git-backed repository checks tolerate source archives without git metadata", () => {
@@ -168,20 +224,59 @@ describe("cli", () => {
     expect(skill).not.toContain("Do not use `learn` for temporary task state; use `checkpoint` instead.");
   });
 
+  test("docs explain the canonical skill and registered Codex and Claude Code locations", () => {
+    const readme = normalizeWhitespace(readFileSync(join(process.cwd(), "README.md"), "utf8"));
+
+    expect(readme).toContain("under `~/.agent-handoff/skills/agent-handoff`");
+    expect(readme).toContain("for Codex under `~/.agents/skills/agent-handoff`");
+    expect(readme).toContain("Claude Code under `~/.claude/skills/agent-handoff`");
+    expect(readme).not.toContain("installs the packaged skill under `~/.agents/skills/agent-handoff`");
+  });
+
+  test("gitignore excludes local handoff and agent files", () => {
+    const ignored = readFileSync(join(process.cwd(), ".gitignore"), "utf8").split(/\r?\n/);
+
+    expect(ignored).toContain(".env*");
+    expect(ignored).toContain(".DS_Store");
+    expect(ignored).toContain(".agents/");
+    expect(ignored).toContain(".agent-handoff/");
+  });
+
   test("enable, checkpoint, and start flow without touching instruction files", () => {
     const tmp = tempDir();
     const repo = join(tmp, "repo");
     const home = join(tmp, "home");
     const skillsHome = join(tmp, "skills");
+    const claudeSkillsHome = join(tmp, "claude-skills");
     mkdirSync(repo);
     // Write a bootstrap only to pin deterministic project id in this unit test.
     // Normal repos can derive the id from git remote.
     const bootstrapPath = join(repo, ".agent-handoff.yml");
 
-    let result = runCli(repo, "--home", home, "enable", "--skills-home", skillsHome);
+    let result = runCli(
+      repo,
+      "--home",
+      home,
+      "enable",
+      "--skills-home",
+      skillsHome,
+      "--claude-skills-home",
+      claudeSkillsHome,
+    );
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("Agent handoff enabled");
+    expect(result.stdout).toContain(join(skillsHome, "agent-handoff", "SKILL.md"));
+    expect(result.stdout).toContain(join(claudeSkillsHome, "agent-handoff", "SKILL.md"));
+    const canonicalSkill = join(home, "skills", "agent-handoff");
+    expect(existsSync(join(canonicalSkill, "SKILL.md"))).toBe(true);
     expect(existsSync(join(skillsHome, "agent-handoff", "SKILL.md"))).toBe(true);
+    expect(existsSync(join(claudeSkillsHome, "agent-handoff", "SKILL.md"))).toBe(true);
+    if (process.platform !== "win32") {
+      expect(lstatSync(join(skillsHome, "agent-handoff")).isSymbolicLink()).toBe(true);
+      expect(lstatSync(join(claudeSkillsHome, "agent-handoff")).isSymbolicLink()).toBe(true);
+      expect(realpathSync(join(skillsHome, "agent-handoff"))).toBe(realpathSync(canonicalSkill));
+      expect(realpathSync(join(claudeSkillsHome, "agent-handoff"))).toBe(realpathSync(canonicalSkill));
+    }
 
     writeFileSync(bootstrapPath, "version: 2\nproject_id: github.com__owner__repo\n");
     writeFileSync(join(repo, "AGENTS.md"), "# Existing\n");
@@ -213,6 +308,24 @@ describe("cli", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("# Agent Handoff Start Packet");
     expect(result.stdout).toContain("Ready for another device.");
+  });
+
+  test("enable reports when an existing skill registration is backed up", () => {
+    const tmp = tempDir();
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    const skillsHome = join(tmp, "skills");
+    const registrationDir = join(skillsHome, "agent-handoff");
+    mkdirSync(repo);
+    mkdirSync(registrationDir, { recursive: true });
+    writeFileSync(join(registrationDir, "SKILL.md"), "---\nname: custom-agent-handoff\n---\n");
+
+    const result = runCli(repo, "--home", home, "enable", "--skills-home", skillsHome);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("backed up previous registration:");
+    expect(result.stdout).toContain("agent-handoff.bak-");
+    expect(readFileSync(join(registrationDir, "SKILL.md"), "utf8")).toContain("agent-handoff start");
   });
 
   test("learn writes global memory", () => {
@@ -318,7 +431,7 @@ describe("cli", () => {
     const home = join(tmp, "home");
     const bare = join(tmp, "vault.git");
     mkdirSync(repo);
-    execFileSync("git", ["init", "--bare", bare]);
+    execGit(["init", "--bare", bare]);
 
     const result = runCli(repo, "--home", home, "sync", "init", bare);
 
@@ -376,6 +489,26 @@ describe("cli", () => {
     expect(result.stdout).toContain(`run agent-handoff sync init ${join(tmp, "vault.git")}`);
   });
 
+  test("status redacts credential-bearing sync URLs", () => {
+    const tmp = tempDir();
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    const vault = join(home, "vault");
+    const syncUrl = "https://x-access-token:ghp_secret123@github.com/owner/vault.git";
+    mkdirSync(repo);
+    mkdirSync(vault, { recursive: true });
+    execGit(["init"], { cwd: vault });
+    execGit(["remote", "add", "origin", syncUrl], { cwd: vault });
+    writeFileSync(join(home, "config.json"), JSON.stringify({ version: 2, vault, sync_url: syncUrl }));
+
+    const result = runCli(repo, "--home", home, "status");
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("https://<redacted>@github.com/owner/vault.git");
+    expect(result.stdout).not.toContain("ghp_secret123");
+    expect(result.stdout).not.toContain("x-access-token");
+  });
+
   test("sync rejects a git vault when sync_url is not configured", () => {
     const tmp = tempDir();
     const repo = join(tmp, "repo");
@@ -384,9 +517,9 @@ describe("cli", () => {
     const remote = join(tmp, "vault.git");
     mkdirSync(repo);
     mkdirSync(vault, { recursive: true });
-    execFileSync("git", ["init", "--bare", remote]);
-    execFileSync("git", ["init"], { cwd: vault });
-    execFileSync("git", ["remote", "add", "origin", remote], { cwd: vault });
+    execGit(["init", "--bare", remote]);
+    execGit(["init"], { cwd: vault });
+    execGit(["remote", "add", "origin", remote], { cwd: vault });
     writeFileSync(join(vault, "note.md"), "unsynced memory\n");
     writeFileSync(join(home, "config.json"), JSON.stringify({ version: 2, vault }));
 
@@ -394,7 +527,7 @@ describe("cli", () => {
 
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("sync is not configured");
-    expect(execFileSync("git", ["ls-remote", "--heads", remote], { encoding: "utf8" })).toBe("");
+    expect(execGit(["ls-remote", "--heads", remote], { encoding: "utf8" })).toBe("");
   });
 
   test("enable reports invalid config without a stack trace", () => {
