@@ -57,6 +57,13 @@ function execGit(args: string[], options: { cwd?: string; encoding?: BufferEncod
   });
 }
 
+function writeMinimalVaultFiles(vault: string): void {
+  mkdirSync(join(vault, "global"), { recursive: true });
+  mkdirSync(join(vault, "projects"), { recursive: true });
+  writeFileSync(join(vault, "global", "preferences.md"), "# Global Preferences\n\n");
+  writeFileSync(join(vault, "global", "lessons.md"), "# Global Lessons\n\n");
+}
+
 function runCli(repo: string, ...args: string[]): { code: number; stdout: string; stderr: string } {
   const stdout = new BufferWriter();
   const stderr = new BufferWriter();
@@ -379,6 +386,54 @@ describe("cli", () => {
     expect(result.stdout).toContain("Learned project decision");
   });
 
+  test("learn rejects --branch unless scope is branch", () => {
+    const tmp = tempDir();
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    mkdirSync(repo);
+    runCli(repo, "--home", home, "enable", "--skills-home", join(tmp, "skills"));
+
+    const result = runCli(
+      repo,
+      "--home",
+      home,
+      "learn",
+      "--kind",
+      "preference",
+      "--branch",
+      "main",
+      "--note",
+      "This branch option should not be ignored.",
+    );
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("--branch can only be used with --scope branch");
+  });
+
+  test("learn rejects branch scope unless kind is context", () => {
+    const tmp = tempDir();
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    mkdirSync(repo);
+    runCli(repo, "--home", home, "enable", "--skills-home", join(tmp, "skills"));
+
+    const result = runCli(
+      repo,
+      "--home",
+      home,
+      "learn",
+      "--scope",
+      "branch",
+      "--kind",
+      "decision",
+      "--note",
+      "Branch decisions should be project decisions.",
+    );
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("branch learn kind must be 'context'");
+  });
+
   test("status reports not ready before enable and ready after enable", () => {
     const tmp = tempDir();
     const repo = join(tmp, "repo");
@@ -444,6 +499,34 @@ describe("cli", () => {
     expect(status.stdout).toContain(`Sync: configured (${bare})`);
   });
 
+  test("sync pushes local vault changes to the configured remote", () => {
+    const tmp = tempDir();
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    const bare = join(tmp, "vault.git");
+    mkdirSync(repo);
+    execGit(["init", "--bare", bare]);
+    runCli(repo, "--home", home, "sync", "init", bare);
+    runCli(
+      repo,
+      "--home",
+      home,
+      "learn",
+      "--kind",
+      "lesson",
+      "--note",
+      "CLI sync should push this memory.",
+    );
+
+    const result = runCli(repo, "--home", home, "sync");
+
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(execGit(["show", "main:global/lessons.md"], { cwd: bare })).toContain(
+      "CLI sync should push this memory.",
+    );
+  });
+
   test("sync help does not expose repository creation", () => {
     const tmp = tempDir();
     const repo = join(tmp, "repo");
@@ -497,6 +580,7 @@ describe("cli", () => {
     const syncUrl = "https://x-access-token:ghp_secret123@github.com/owner/vault.git";
     mkdirSync(repo);
     mkdirSync(vault, { recursive: true });
+    writeMinimalVaultFiles(vault);
     execGit(["init"], { cwd: vault });
     execGit(["remote", "add", "origin", syncUrl], { cwd: vault });
     writeFileSync(join(home, "config.json"), JSON.stringify({ version: 2, vault, sync_url: syncUrl }));

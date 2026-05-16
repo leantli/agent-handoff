@@ -140,7 +140,6 @@ export function setupHome(opts: {
   const desired: Config = { version: 2, vault: vaultPath };
   if (syncUrl) desired.sync_url = syncUrl;
   const existing = existsSync(configPath) ? readConfig(opts.home) : null;
-  if (existsSync(configPath) && !existing) throw new HandoffError(`${CONFIG_FILE} is missing`);
 
   if (syncUrl) {
     ensureGitRemote(vaultPath, syncUrl);
@@ -504,6 +503,12 @@ export function learn(
   if (!["preference", "lesson", "decision", "context"].includes(kind)) {
     throw new HandoffError("learn kind must be 'preference', 'lesson', 'decision', or 'context'");
   }
+  if (opts.branch && scope !== "branch") {
+    throw new HandoffError("--branch can only be used with --scope branch");
+  }
+  if (scope === "branch" && kind !== "context") {
+    throw new HandoffError("branch learn kind must be 'context'");
+  }
 
   const setup = loadSetup(opts.home);
   const path = learnTargetPath(setup, resolve(opts.root ?? "."), scope, kind, opts.branch);
@@ -513,19 +518,27 @@ export function learn(
 }
 
 export function syncVault(opts: { home?: string } = {}): string[] {
-  const setup = loadSetup(opts.home);
   const config = readConfig(opts.home);
-  if (!config?.sync_url) {
+  if (!config) throw new HandoffError("agent-handoff is not enabled; run agent-handoff enable");
+  if (!config.sync_url) {
     throw new HandoffError("sync is not configured; run agent-handoff sync init <git-url> first");
   }
-  const syncProblem = syncConfigProblem(setup.vault, config.sync_url);
+  const vault = resolve(config.vault);
+  if (!existsSync(vault)) throw new HandoffError(`vault directory is missing: ${vault}`);
+  const syncProblem = syncConfigProblem(vault, config.sync_url);
   if (syncProblem) throw new HandoffError(syncProblem);
+  const vaultProblems = requiredVaultProblems(vault);
+  if (vaultProblems.length > 0) {
+    throw new HandoffError(`agent handoff is not ready:\n${vaultProblems.map((problem) => `- ${problem}`).join("\n")}`);
+  }
+  const setup = { home: resolveHome(opts.home), vault, created: 0, updated: 0 };
   const outputs: string[] = [];
 
   if (hasActiveGitOperation(setup.vault) || hasUnmergedFiles(setup.vault)) {
     throw syncConflictError(setup.vault);
   }
 
+  const branch = currentGitBranch(setup.vault);
   gitChecked(setup.vault, ["add", "-A"]);
   const staged = gitRun(setup.vault, ["diff", "--cached", "--quiet"]).status !== 0;
   if (staged) {
@@ -542,7 +555,6 @@ export function syncVault(opts: { home?: string } = {}): string[] {
     );
   }
 
-  const branch = currentGitBranch(setup.vault);
   if (remoteHasRefs(setup.vault, config.sync_url)) {
     const pull = gitRun(setup.vault, ["pull", "--rebase", "--autostash", "origin", branch]);
     if (pull.status !== 0) {
@@ -585,6 +597,7 @@ export function getStatus(opts: { root?: string; home?: string } = {}): Status {
   } else if (!existsSync(config.vault)) {
     problems.push(`vault directory is missing: ${config.vault}`);
   } else {
+    problems.push(...requiredVaultProblems(config.vault));
     if (config.sync_url) {
       const syncProblem = syncConfigProblem(config.vault, config.sync_url);
       if (syncProblem) {
@@ -620,6 +633,30 @@ function projectSeedFiles(): Record<string, string> {
     "decisions.md": "# Decisions\n\n",
     "preferences.md": "# Project Preferences\n\n",
   };
+}
+
+function requiredVaultProblems(vault: string): string[] {
+  const required: Array<{ path: string; kind: "directory" | "file" }> = [
+    { path: join(vault, "global"), kind: "directory" },
+    { path: join(vault, "global", "preferences.md"), kind: "file" },
+    { path: join(vault, "global", "lessons.md"), kind: "file" },
+    { path: join(vault, "projects"), kind: "directory" },
+  ];
+  const problems: string[] = [];
+  for (const item of required) {
+    if (!existsSync(item.path)) {
+      problems.push(`vault is missing required path: ${item.path}; run agent-handoff enable to repair it`);
+      continue;
+    }
+    const stat = lstatSync(item.path);
+    if (item.kind === "directory" && !stat.isDirectory()) {
+      problems.push(`vault path must be a directory: ${item.path}; move or remove this path, then run agent-handoff enable`);
+    }
+    if (item.kind === "file" && !stat.isFile()) {
+      problems.push(`vault path must be a file: ${item.path}; move or remove this path, then run agent-handoff enable`);
+    }
+  }
+  return problems;
 }
 
 function ensureProjectFiles(projectPath: string, branch: string): number {
@@ -758,6 +795,10 @@ function loadSetup(home?: string): SetupResult {
   const config = readConfig(home);
   if (!config) throw new HandoffError("agent-handoff is not enabled; run agent-handoff enable");
   if (!existsSync(config.vault)) throw new HandoffError(`vault directory is missing: ${config.vault}`);
+  const vaultProblems = requiredVaultProblems(config.vault);
+  if (vaultProblems.length > 0) {
+    throw new HandoffError(`agent handoff is not ready:\n${vaultProblems.map((problem) => `- ${problem}`).join("\n")}`);
+  }
   return { home: resolveHome(home), vault: resolve(config.vault), created: 0, updated: 0 };
 }
 
@@ -1128,7 +1169,15 @@ function gitRun(root: string, args: string[]): { status: number; output: string 
 }
 
 function currentGitBranch(root: string): string {
-  return gitOutput(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]) ?? "main";
+  const result = gitRun(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  const branch = result.status === 0 ? result.output.trim() : "";
+  if (branch) return branch;
+  if (gitOutput(root, ["rev-parse", "--verify", "HEAD"])) {
+    throw new HandoffError(
+      "vault git repository is in detached HEAD; checkout a branch in the vault, then run agent-handoff sync again",
+    );
+  }
+  throw new HandoffError(redactGitUrls(result.output.trim()) || "cannot determine vault git branch");
 }
 
 function hasUnmergedFiles(vault: string): boolean {
