@@ -255,6 +255,65 @@ describe("vault setup", () => {
     expect(status.syncUrl).toBe(bare);
   });
 
+  test("status reports missing required vault paths", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    enableHandoff({ home, skillsHome: join(tmp, "skills"), claudeSkillsHome: join(tmp, "claude-skills") });
+    rmSync(join(home, "vault", "global"), { recursive: true, force: true });
+    rmSync(join(home, "vault", "projects"), { recursive: true, force: true });
+
+    const status = getStatus({ home });
+
+    expect(status.initialized).toBe(false);
+    expect(status.problems.join("\n")).toContain(join(home, "vault", "global"));
+    expect(status.problems.join("\n")).toContain(join(home, "vault", "projects"));
+  });
+
+  test("status reports missing required global seed files", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    enableHandoff({ home, skillsHome: join(tmp, "skills"), claudeSkillsHome: join(tmp, "claude-skills") });
+    rmSync(join(home, "vault", "global", "lessons.md"), { force: true });
+
+    const status = getStatus({ home });
+
+    expect(status.initialized).toBe(false);
+    expect(status.problems.join("\n")).toContain(join(home, "vault", "global", "lessons.md"));
+  });
+
+  test("status reports required vault paths with the wrong type", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    enableHandoff({ home, skillsHome: join(tmp, "skills"), claudeSkillsHome: join(tmp, "claude-skills") });
+    rmSync(join(home, "vault", "global", "lessons.md"), { force: true });
+    mkdirSync(join(home, "vault", "global", "lessons.md"));
+
+    const status = getStatus({ home });
+
+    expect(status.initialized).toBe(false);
+    expect(status.problems.join("\n")).toContain(
+      `vault path must be a file: ${join(home, "vault", "global", "lessons.md")}; move or remove this path, then run agent-handoff enable`,
+    );
+  });
+
+  test("syncVault rejects a detached vault HEAD instead of silently skipping detached commits", () => {
+    const tmp = tempDir();
+    const bare = join(tmp, "vault.git");
+    const home = join(tmp, "home");
+    execGit(["init", "--bare", bare]);
+    setupHome({ home, syncUrl: bare });
+    learn("Base memory.", { home, kind: "lesson" });
+    syncVault({ home });
+    const vault = join(home, "vault");
+    execGit(["checkout", "--detach", "HEAD"], { cwd: vault });
+    const detachedHead = execGit(["rev-parse", "HEAD"], { cwd: vault }).trim();
+    learn("Detached memory must not be reported as synced.", { home, kind: "lesson" });
+
+    expect(() => syncVault({ home })).toThrow("vault git repository is in detached HEAD");
+    expect(execGit(["rev-parse", "HEAD"], { cwd: vault }).trim()).toBe(detachedHead);
+    expect(execGit(["show", "main:global/lessons.md"], { cwd: bare })).not.toContain("Detached memory");
+  });
+
   test("normalizeProjectId handles HTTPS and SSH remotes", () => {
     expect(normalizeProjectId("https://github.com/leantli/agent-handoff.git")).toBe(
       "github.com__leantli__agent-handoff",
@@ -630,6 +689,36 @@ describe("start, checkpoint, and learn", () => {
 
     expect(readFileSync(project.path, "utf8")).toContain("vault-first");
     expect(readFileSync(branch.path, "utf8")).toContain("v0.3");
+  });
+
+  test("learn rejects branch scope with non-context kinds", () => {
+    const tmp = tempDir();
+    const root = join(tmp, "repo");
+    const home = join(tmp, "home");
+    mkdirSync(root);
+    enableHandoff({ home, skillsHome: join(tmp, "skills"), claudeSkillsHome: join(tmp, "claude-skills") });
+    writeFileSync(join(root, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo\n");
+    buildStartPacket({ root, home, branch: "main" });
+
+    expect(() =>
+      learn("Branch decisions should be project decisions.", {
+        home,
+        root,
+        scope: "branch",
+        kind: "decision",
+        branch: "main",
+      }),
+    ).toThrow("branch learn kind must be 'context'");
+  });
+
+  test("learn rejects branch option outside branch scope", () => {
+    expect(() =>
+      learn("Branch option should not be ignored.", {
+        scope: "project",
+        kind: "decision",
+        branch: "main",
+      }),
+    ).toThrow("--branch can only be used with --scope branch");
   });
 
   test("branch scoped memory does not collide for branch names with the same sanitized form", () => {

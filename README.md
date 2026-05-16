@@ -12,6 +12,8 @@ not modify `AGENTS.md`, `CLAUDE.md`, or other project instruction files.
 
 ## Quick Start
 
+Requires Node.js 22.12.0 or newer.
+
 ```bash
 npm install -g @leantli/agent-handoff
 agent-handoff enable
@@ -77,6 +79,9 @@ agent-handoff learn --scope project --kind decision --note "Use TypeScript for t
 agent-handoff learn --scope branch --kind context --note "This branch is testing the sync workflow."
 ```
 
+`--scope branch` only accepts `--kind context`. The `--branch` option only
+applies to branch-scoped memory.
+
 ## Memory Model
 
 Think of `agent-handoff` as a shared handoff notebook with three layers:
@@ -93,6 +98,8 @@ Most users only need to choose between durable memory and a checkpoint:
 - Use global memory only for facts that should follow the user across projects.
   If a fact is repo-specific, keep it in project memory. Use branch context only
   for branch-specific work.
+- Branch-scoped memory only stores current context. Put decisions and
+  preferences in project memory.
 - Never store secrets, tokens, credentials, or private customer data.
 
 The `learn --kind` values are lightweight labels for agents. They help separate
@@ -201,6 +208,7 @@ agent-handoff status      # quick readiness and sync-state check
 ## Development
 
 ```bash
+node --version # 22.12.0 or newer
 npm install
 npm test
 npm run typecheck

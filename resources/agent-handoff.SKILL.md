@@ -63,9 +63,11 @@ Before writing memory, choose one of three layers:
   `learn`.
 
 Within project memory, use branch scope only for branch-specific context that
-should survive a restart but should not apply to the whole project. If in doubt
-between global and project, choose project. Do not store low-value observations,
-one-off command output, secrets, tokens, credentials, or private customer data.
+should survive a restart but should not apply to the whole project. Branch scope
+only accepts `--kind context`; store decisions and preferences at project scope.
+If in doubt between global and project, choose project. Do not store low-value
+observations, one-off command output, secrets, tokens, credentials, or private
+customer data.
 
 For a durable user preference or recurring correction:
 

@@ -1,10 +1,18 @@
 {
   "name": "@leantli/agent-handoff",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Shared vault handoff memory for coding agents.",
   "type": "module",
   "license": "MIT",
   "author": "agent-handoff contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leantli/agent-handoff.git"
+  },
+  "bugs": {
+    "url": "https://github.com/leantli/agent-handoff/issues"
+  },
+  "homepage": "https://github.com/leantli/agent-handoff#readme",
   "bin": {
     "agent-handoff": "dist/bin.js"
   },
@@ -28,7 +36,7 @@
     "prepublishOnly": "npm run typecheck && npm test && npm run build && npm run smoke:import",
     "smoke:import": "node -e \"import('./dist/index.js').then((m) => { if (!m.enableHandoff || !m.installSkill || !m.syncVault) process.exit(1); })\"",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json"
   },
   "keywords": [
     "ai",
@@ -39,14 +47,14 @@
     "context"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22.12.0"
   },
   "dependencies": {
     "commander": "^12.1.0"
   },
   "devDependencies": {
-    "@types/node": "^20.11.0",
+    "@types/node": "^22.19.19",
     "typescript": "^5.4.0",
-    "vitest": "^1.6.0"
+    "vitest": "^4.1.6"
   }
 }
