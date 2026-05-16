@@ -26,6 +26,8 @@ const SECRET_PATTERNS = [
   /(api[_-]?key|token|secret|password)\s*[:=]/i,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
   /\bsk-[A-Za-z0-9_-]{8,}\b/,
+  /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
 ];
 const GIT_TIMEOUT_MS = 30_000;
 const MANAGED_SKILL_MARKER = ".agent-handoff-managed.json";

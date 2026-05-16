@@ -644,6 +644,21 @@ describe("start, checkpoint, and learn", () => {
     ).toThrow(HandoffError);
   });
 
+  test("writeCheckpoint rejects GitHub personal access tokens", () => {
+    const tmp = tempDir();
+    const root = join(tmp, "repo");
+    const home = join(tmp, "home");
+    mkdirSync(root);
+    enableHandoff({ home, skillsHome: join(tmp, "skills") });
+    writeFileSync(join(root, ".agent-handoff.yml"), "version: 2\nproject_id: github.com__owner__repo\n");
+    buildStartPacket({ root, home });
+    const token = ["ghp", "1234567890abcdef1234567890abcdef1234"].join("_");
+
+    expect(() =>
+      writeCheckpoint({ root, note: `Use ${token} for tests.`, home }),
+    ).toThrow(HandoffError);
+  });
+
   test("learn appends global preferences and lessons", () => {
     const tmp = tempDir();
     const home = join(tmp, "home");
@@ -662,6 +677,20 @@ describe("start, checkpoint, and learn", () => {
     setupHome({ home });
 
     expect(() => learn("password=hunter2", { home, kind: "lesson" })).toThrow(HandoffError);
+  });
+
+  test("learn rejects fine-grained GitHub tokens", () => {
+    const tmp = tempDir();
+    const home = join(tmp, "home");
+    setupHome({ home });
+    const token = ["github", "pat", "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"].join("_");
+
+    expect(() =>
+      learn(token, {
+        home,
+        kind: "lesson",
+      }),
+    ).toThrow(HandoffError);
   });
 
   test("learn can write project and branch scoped memory", () => {
